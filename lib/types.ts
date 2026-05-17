@@ -10,20 +10,17 @@ export type Repo = {
   owner: { login: string; avatar_url: string };
 };
 
-export type PromptResults = {
-  /** Effective GitHub `q=` for diversified query slot 1 (`→` = rare-word retries). */
-  tech: string;
-  /** Slot 2 (historical field name `useCase`). */
-  useCase: string;
-  /** Slot 3 (historical field name `ecosystem`). */
-  ecosystem: string;
-};
-
 export type SimilarResult = {
   source: Repo;
   similar: Repo[];
-  /** Human-readable summary of queries used for GitHub search. */
+  /** Human-readable summary line for the UI. */
   reasoning: string;
-  /** Effective search queries per angle (optional for older clients). */
-  promptResults?: PromptResults;
+  /** Final GitHub `q=` passed to `/search/code`. */
+  codeSearchQuery?: string;
+  /** Which root env template file drove the similarity (e.g. `.env.example`). */
+  similarityFile?: string;
+  /** Env variable names ultimately used in `codeSearchQuery`. */
+  extractedKeys?: string[];
+  /** All queries attempted (shrinking keys); useful for debugging. */
+  queriesTried?: string[];
 };

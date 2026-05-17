@@ -1,8 +1,5 @@
 import type { Repo } from "@/lib/types";
 
-/** README body max characters passed into LLM prompts (truncation). */
-export const README_MAX_CHARS = 3000;
-
 function githubHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
@@ -13,91 +10,179 @@ function githubHeaders(): Record<string, string> {
   return headers;
 }
 
-export async function ghFetch(url: string): Promise<unknown> {
-  const r = await fetch(url, { headers: githubHeaders() });
-  if (!r.ok) {
-    if (r.status === 404) throw new Error("Repository not found.");
-    if (r.status === 403) throw new Error("GitHub API rate limit reached. Try again in a minute.");
-    throw new Error(`GitHub error (${r.status})`);
-  }
-  return r.json();
+async function ghJson(url: string, options?: RequestInit): Promise<{ ok: boolean; status: number; data: unknown }> {
+  const r = await fetch(url, {
+    ...options,
+    headers: { ...githubHeaders(), ...options?.headers },
+    signal: options?.signal ?? AbortSignal.timeout(30_000),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ok: r.ok, status: r.status, data };
 }
 
-const GITHUB_SEARCH_URL = "https://api.github.com/search/repositories";
+export async function ghFetch(url: string): Promise<unknown> {
+  const { ok, status, data } = await ghJson(url);
+  if (!ok) {
+    if (status === 404) throw new Error("Repository not found.");
+    if (status === 403) throw new Error("GitHub API rate limit reached. Try again in a minute.");
+    throw new Error(`GitHub error (${status})`);
+  }
+  return data;
+}
+
+/** One entry from `GET .../git/trees/:sha` (non-recursive). */
+export type TreeEntry = {
+  path: string;
+  type: "blob" | "tree" | "commit";
+  sha: string;
+};
+
+export type RepoBranchRef = {
+  sha: string;
+};
 
 /**
- * GitHub repository search (`/search/repositories`), sorted by stars.
+ * Root listing via Git Trees API (branch HEAD → commit → tree SHA → tree).
  */
-export async function searchRepositories(
+export async function getRootTree(
+  owner: string,
+  repo: string,
+  branch: string
+): Promise<TreeEntry[]> {
+  const branchesUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches/${encodeURIComponent(branch)}`;
+  const branchJson = await ghFetch(branchesUrl) as {
+    commit?: RepoBranchRef | { sha?: string };
+  };
+
+  let commitSha: string | undefined;
+  if (
+    typeof branchJson?.commit === "object" &&
+    branchJson.commit &&
+    typeof (branchJson.commit as RepoBranchRef).sha === "string"
+  ) {
+    commitSha = (branchJson.commit as RepoBranchRef).sha;
+  }
+
+  if (!commitSha?.trim()) throw new Error("Could not resolve default branch for repository.");
+
+  const commitUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits/${encodeURIComponent(commitSha)}`;
+  const commitData = (await ghFetch(commitUrl)) as { tree?: { sha?: string } };
+  const treeSha = typeof commitData?.tree?.sha === "string" ? commitData.tree.sha : "";
+  if (!treeSha.trim()) throw new Error("Could not resolve repository tree.");
+
+  const treeUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(treeSha)}`;
+  const treeData = (await ghFetch(treeUrl)) as { tree?: TreeEntry[] };
+  return Array.isArray(treeData.tree) ? treeData.tree : [];
+}
+
+/** File body from Contents API (base64 decoding). Throws on failure. */
+export async function getFileContent(owner: string, repo: string, path: string, branch: string): Promise<string> {
+  const encodedPath = path
+    .split("/")
+    .filter(Boolean)
+    .map((s) => encodeURIComponent(s))
+    .join("/");
+  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`;
+
+  const { ok, status, data } = await ghJson(url);
+  if (status === 404) throw new Error(`File "${path}" not found in repository.`);
+  if (!ok) {
+    if (status === 403) throw new Error("GitHub API rate limit reached. Try again in a minute.");
+    throw new Error(`GitHub error (${status})`);
+  }
+
+  const file = data as {
+    encoding?: string;
+    content?: string;
+    /** Symlinks / dirs return type !== file */
+    type?: string;
+  };
+  if (file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string") {
+    throw new Error(`Could not load file "${path}" as text.`);
+  }
+
+  try {
+    return Buffer.from(file.content.replace(/\s/g, ""), "base64").toString("utf-8");
+  } catch {
+    throw new Error(`Could not decode file "${path}".`);
+  }
+}
+
+const GITHUB_CODE_SEARCH_URL = "https://api.github.com/search/code";
+
+export type CodeSearchHit = {
+  path: string;
+  repository: Record<string, unknown>;
+};
+
+/**
+ * Code search (`/search/code`). Authenticated requests required for reliable results.
+ */
+export async function searchCode(
   query: string,
-  perPage = 15
-): Promise<{ items: Repo[]; total_count: number }> {
+  perPage = 30
+): Promise<{ items: CodeSearchHit[]; total_count: number }> {
   const trimmed = query.trim();
   if (!trimmed) return { items: [], total_count: 0 };
 
-  const url = new URL(GITHUB_SEARCH_URL);
+  if (!process.env.GITHUB_TOKEN?.trim()) {
+    throw new Error(
+      "GitHub code search requires GITHUB_TOKEN. Add a token to .env.local for higher limits and guaranteed access."
+    );
+  }
+
+  const url = new URL(GITHUB_CODE_SEARCH_URL);
   url.searchParams.set("q", trimmed);
-  url.searchParams.set("per_page", String(perPage));
-  url.searchParams.set("sort", "stars");
-  url.searchParams.set("order", "desc");
+  url.searchParams.set("per_page", String(Math.min(100, Math.max(1, perPage))));
 
   const r = await fetch(url.toString(), {
     headers: githubHeaders(),
     signal: AbortSignal.timeout(30_000),
   });
 
+  const data = (await r.json().catch(() => ({}))) as {
+    items?: CodeSearchHit[];
+    total_count?: number;
+    message?: string;
+  };
+
   if (!r.ok) {
     if (r.status === 403) {
       throw new Error("GitHub API rate limit reached. Try again in a minute.");
     }
-    console.warn(`[gitsimilar] GitHub search HTTP ${r.status} for query: ${trimmed.slice(0, 120)}`);
+    if (r.status === 401 || r.status === 422) {
+      const msg =
+        typeof data.message === "string"
+          ? data.message
+          : "GitHub code search failed — check GITHUB_TOKEN and query syntax.";
+      throw new Error(msg);
+    }
+    console.warn(
+      `[gitsimilar] GitHub code search HTTP ${r.status} for query: ${trimmed.slice(0, 120)}`
+    );
     return { items: [], total_count: 0 };
   }
 
-  const data = (await r.json()) as {
-    items?: Record<string, unknown>[];
-    total_count?: number;
+  return {
+    items: Array.isArray(data.items) ? data.items : [],
+    total_count: data.total_count ?? 0,
   };
-  const items = (data.items ?? []).map((row) => toRepo(row));
-
-  return { items, total_count: data.total_count ?? 0 };
 }
 
-type ReadmeContentsResponse = { content?: string; encoding?: string };
-
-/** Raw README from GitHub API (base64). Returns empty string if missing or on 404. */
-export async function getReadme(
-  owner: string,
-  repo: string,
-  branch: string = "main"
-): Promise<string> {
-  const url = `https://api.github.com/repos/${owner}/${repo}/readme?ref=${encodeURIComponent(branch)}`;
-  const res = await fetch(url, { headers: githubHeaders() });
-
-  if (res.status === 404) return "";
-
-  if (!res.ok) {
-    if (res.status === 403) {
-      throw new Error("GitHub API rate limit reached. Try again in a minute.");
-    }
-    throw new Error(`GitHub error (${res.status})`);
+/** Map code hits to repos, preserving first-hit order per `full_name`. */
+export function reposFromCodeHits(hits: CodeSearchHit[]): Repo[] {
+  const seen = new Set<string>();
+  const out: Repo[] = [];
+  for (const hit of hits) {
+    const row = hit.repository;
+    if (!row || typeof row !== "object") continue;
+    const repo = toRepo(row);
+    const key = repo.full_name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(repo);
   }
-
-  const data = (await res.json()) as ReadmeContentsResponse;
-  if (data.encoding !== "base64" || typeof data.content !== "string") return "";
-
-  try {
-    return Buffer.from(data.content.replace(/\s/g, ""), "base64").toString("utf-8");
-  } catch {
-    return "";
-  }
-}
-
-/** Truncate README for prompt injection. */
-export function truncateReadme(readme: string): string {
-  if (!readme) return "";
-  if (readme.length <= README_MAX_CHARS) return readme;
-  return `${readme.slice(0, README_MAX_CHARS)}\n\n… (README truncated)`;
+  return out;
 }
 
 export function toRepo(r: Record<string, unknown>): Repo {

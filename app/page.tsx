@@ -54,13 +54,13 @@ export default function HomePage() {
         <section className="text-center max-w-2xl mx-auto">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-border/60 bg-card/50 text-xs text-muted-foreground mb-6">
             <Github className="w-3 h-3 text-primary" />
-            AI-powered repo discovery
+            Env-template + GitHub code search discovery
           </div>
           <h2 className="text-5xl md:text-6xl font-bold tracking-tight mb-4">
             Find <span className="text-primary">similar</span> repos
           </h2>
           <p className="text-muted-foreground text-lg mb-10">
-            Paste any GitHub repository and discover projects built around the same ideas.
+            Paste a GitHub repo with a root `.env.example` — we pick shared API keys via AI and find other repos declaring the same stack.
           </p>
 
           <form onSubmit={onSubmit} className="relative max-w-xl mx-auto">
@@ -147,24 +147,56 @@ function SourceCard({ result }: { result: SimilarResult }) {
           </div>
           <p className="text-sm text-muted-foreground mb-3">{r.description ?? "No description"}</p>
           <p className="text-sm text-foreground/80 italic mb-3">&quot;{result.reasoning}&quot;</p>
-          {result.promptResults && (
+          {(result.codeSearchQuery ?? result.extractedKeys?.length ?? result.queriesTried?.length) && (
             <details className="mb-3 rounded-lg border border-border/60 bg-background/40 px-3 py-2 text-left">
               <summary className="cursor-pointer text-xs font-semibold text-muted-foreground hover:text-foreground">
-                Three diversified GitHub search queries
+                GitHub code search details
               </summary>
-              <div className="mt-3 space-y-3 max-h-64 overflow-y-auto text-xs">
-                {[
-                  { label: "Query 1", text: result.promptResults.tech },
-                  { label: "Query 2", text: result.promptResults.useCase },
-                  { label: "Query 3", text: result.promptResults.ecosystem },
-                ].map(({ label, text }) => (
-                  <div key={label}>
-                    <div className="font-medium text-muted-foreground mb-1">{label}</div>
+              <div className="mt-3 space-y-3 text-xs">
+                {result.similarityFile && (
+                  <div>
+                    <div className="font-medium text-muted-foreground mb-1">Similarity file</div>
+                    <code className="rounded-md bg-muted/30 px-2 py-1 text-[11px]">{result.similarityFile}</code>
+                  </div>
+                )}
+                {result.extractedKeys && result.extractedKeys.length > 0 && (
+                  <div>
+                    <div className="font-medium text-muted-foreground mb-1">Env keys searched</div>
+                    <div className="flex flex-wrap gap-1">
+                      {result.extractedKeys.map((k) => (
+                        <span
+                          key={k}
+                          className="rounded-md border border-border/60 bg-muted/20 px-1.5 py-0.5 text-[10px] font-mono"
+                        >
+                          {k}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.codeSearchQuery && (
+                  <div>
+                    <div className="font-medium text-muted-foreground mb-1">Final query (`q=`)</div>
                     <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2 text-[11px] leading-relaxed">
-                      {text.trim() || "(empty)"}
+                      {result.codeSearchQuery.trim()}
                     </pre>
                   </div>
-                ))}
+                )}
+                {result.queriesTried && result.queriesTried.length > 1 && (
+                  <div>
+                    <div className="font-medium text-muted-foreground mb-1">Retries (dropped least important keys)</div>
+                    <div className="space-y-1 max-h-32 overflow-y-auto">
+                      {result.queriesTried.map((q, i) => (
+                        <pre
+                          key={i}
+                          className="whitespace-pre-wrap break-words rounded-md bg-muted/20 p-2 text-[10px] leading-relaxed"
+                        >
+                          {q}
+                        </pre>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </details>
           )}
