@@ -1,6 +1,6 @@
 # GitSimilar
 
-Find GitHub repositories similar to one you paste — Next.js app using **OpenAI Responses API** (`web_search`) plus the **GitHub REST API**.
+Find GitHub repositories similar to one you paste — Next.js app using **OpenRouter** (one call outputs **three diversified search queries** as JSON) plus **GitHub Search** and the **GitHub REST API** (metadata + README).
 
 Ported from **git-matchmaker** (TanStack Start): same UI and dark theme, **without** gradient/glow styling.
 
@@ -9,7 +9,7 @@ Ported from **git-matchmaker** (TanStack Start): same UI and dark theme, **witho
 ```bash
 npm install
 cp .env.local.example .env.local
-# Add OPENAI_API_KEY (required). Optionally GITHUB_TOKEN for higher GitHub limits.
+# Add OPENROUTER_API_KEY (required). Optionally GITHUB_TOKEN for higher GitHub limits.
 npm run dev
 ```
 
@@ -19,16 +19,17 @@ Open [http://localhost:3000](http://localhost:3000).
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `OPENAI_API_KEY` | Yes | OpenAI API key for Responses API + hosted web search |
+| `OPENROUTER_API_KEY` | Yes | OpenRouter API key (OpenAI-compatible chat completions) |
+| `OPENROUTER_MODEL` | No | Defaults to `openai/gpt-4o-mini` |
 | `GITHUB_TOKEN` | No | `Bearer` token for GitHub REST (higher rate limits) |
-| `OPENAI_MODEL` | No | Defaults to `gpt-4.1-mini` |
 
 ## How it works
 
 1. Parses `owner/repo` or a GitHub URL.
-2. Loads the source repo from GitHub REST.
-3. Calls OpenAI **Responses** with the **`web_search`** tool to discover similar repos on the web.
-4. Parses `github.com/owner/repo` URLs from the model output and hydrates each via GitHub REST.
+2. Loads the source repo from GitHub REST (description, topics, language, default branch) and fetches the README.
+3. Runs **one** OpenRouter call that returns JSON `{"q1","q2","q3"}` — three **diverse** purpose-focused GitHub search phrases (mutually exclusive wording, no repo slug in queries; gitsearchai-style keyword discipline).
+4. Runs **`GET /search/repositories`** once per query (sorted by stars). If a search returns zero hits, retries with gitsearchai-style **rare-word removal** via the LLM (up to a few trims per query).
+5. **Merges** result lists by how many queries surfaced each repo (and first-seen order), yields up to **12** repos.
 
 ## Scripts
 

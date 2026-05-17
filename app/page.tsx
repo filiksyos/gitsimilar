@@ -147,6 +147,27 @@ function SourceCard({ result }: { result: SimilarResult }) {
           </div>
           <p className="text-sm text-muted-foreground mb-3">{r.description ?? "No description"}</p>
           <p className="text-sm text-foreground/80 italic mb-3">&quot;{result.reasoning}&quot;</p>
+          {result.promptResults && (
+            <details className="mb-3 rounded-lg border border-border/60 bg-background/40 px-3 py-2 text-left">
+              <summary className="cursor-pointer text-xs font-semibold text-muted-foreground hover:text-foreground">
+                Three diversified GitHub search queries
+              </summary>
+              <div className="mt-3 space-y-3 max-h-64 overflow-y-auto text-xs">
+                {[
+                  { label: "Query 1", text: result.promptResults.tech },
+                  { label: "Query 2", text: result.promptResults.useCase },
+                  { label: "Query 3", text: result.promptResults.ecosystem },
+                ].map(({ label, text }) => (
+                  <div key={label}>
+                    <div className="font-medium text-muted-foreground mb-1">{label}</div>
+                    <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2 text-[11px] leading-relaxed">
+                      {text.trim() || "(empty)"}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
           <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
             <Stat icon={<Star className="w-3 h-3" />} value={r.stargazers_count.toLocaleString()} />
             <Stat icon={<GitFork className="w-3 h-3" />} value={r.forks_count.toLocaleString()} />
