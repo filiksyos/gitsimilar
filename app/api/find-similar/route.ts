@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { parseRepoInput } from "@/lib/parse-repo";
-import { getFileContent, getRootTree, ghFetch, type TreeEntry, toRepo } from "@/lib/github";
+import { batchFetchRepoStats, getFileContent, getRootTree, ghFetch, type TreeEntry, toRepo } from "@/lib/github";
 import { parseEnvKeys } from "@/lib/env-extractor";
 import { SIMILARITY_FILES, searchCodeWithRetry } from "@/lib/code-search-query";
 import { buildKeySelectionPrompt, parseSelectedKeys } from "@/lib/prompts";
@@ -126,7 +126,13 @@ export async function POST(req: Request): Promise<Response> {
       console.log(`[gitsimilar] hits: ${search.total_count}\n`);
     }
 
-    const similar = finalizeSimilarRepos(search.repos, source.full_name);
+    const statsMap = await batchFetchRepoStats(search.repos);
+    const enriched = search.repos.map((r) => {
+      const s = statsMap.get(r.full_name.toLowerCase());
+      return s ? { ...r, ...s } : r;
+    });
+
+    const similar = finalizeSimilarRepos(enriched, source.full_name);
 
     if (similar.length === 0) {
       throw new Error(

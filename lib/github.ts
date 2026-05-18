@@ -1,3 +1,4 @@
+import { LRUCache } from "lru-cache";
 import type { Repo } from "@/lib/types";
 
 function githubHeaders(): Record<string, string> {
@@ -201,4 +202,143 @@ export function toRepo(r: Record<string, unknown>): Repo {
       avatar_url: (owner?.avatar_url as string | undefined) ?? "",
     },
   };
+}
+
+/** Stats merged into `Repo` after batched GraphQL lookup (see `batchFetchRepoStats`). */
+export type RepoStats = {
+  stargazers_count: number;
+  forks_count: number;
+  description: string | null;
+};
+
+const repoStatsCache = new LRUCache<string, RepoStats>({
+  max: 500,
+  ttl: 10 * 60 * 1000,
+});
+
+function escapeGraphQlString(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function parseOwnerRepo(fullName: string): { owner: string; name: string } | null {
+  const i = fullName.indexOf("/");
+  if (i <= 0 || i >= fullName.length - 1) return null;
+  return { owner: fullName.slice(0, i), name: fullName.slice(i + 1) };
+}
+
+function graphqlPostHeaders(): Record<string, string> {
+  return {
+    ...githubHeaders(),
+    "Content-Type": "application/json",
+  };
+}
+
+/**
+ * Fetches live star/fork/description for repos via one batched GitHub GraphQL request.
+ * Uses an LRU + TTL cache keyed by lowercase `owner/repo`.
+ * On HTTP or parse failures, logs and returns a partial map (never throws).
+ */
+export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, RepoStats>> {
+  const result = new Map<string, RepoStats>();
+
+  type Miss = { cacheKey: string; owner: string; name: string };
+  const misses: Miss[] = [];
+  const pendingMissKeys = new Set<string>();
+
+  for (const repo of repos) {
+    const cacheKey = repo.full_name.toLowerCase();
+    const cached = repoStatsCache.get(cacheKey);
+    if (cached) {
+      result.set(cacheKey, cached);
+      continue;
+    }
+    const parsed = parseOwnerRepo(repo.full_name);
+    if (!parsed) continue;
+    if (pendingMissKeys.has(cacheKey)) continue;
+    pendingMissKeys.add(cacheKey);
+    misses.push({ cacheKey, owner: parsed.owner, name: parsed.name });
+  }
+
+  if (misses.length === 0) return result;
+
+  if (!process.env.GITHUB_TOKEN?.trim()) {
+    console.warn("[gitsimilar] batchFetchRepoStats: GITHUB_TOKEN missing; skipping GraphQL enrichment.");
+    return result;
+  }
+
+  const selection = `nameWithOwner stargazerCount forkCount description`;
+  const lines = misses.map(
+    (m, i) =>
+      `repo${i}: repository(owner: "${escapeGraphQlString(m.owner)}", name: "${escapeGraphQlString(m.name)}") { ${selection} }`
+  );
+  const query = `query BatchRepoStats {\n${lines.join("\n")}\n}`;
+
+  try {
+    const r = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: graphqlPostHeaders(),
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    const raw = (await r.json().catch(() => ({}))) as {
+      data?: Record<string, unknown>;
+      errors?: unknown[];
+    };
+
+    if (!r.ok) {
+      console.warn(
+        `[gitsimilar] GraphQL HTTP ${r.status}: ${JSON.stringify(raw).slice(0, 800)}`
+      );
+      return result;
+    }
+
+    if (Array.isArray(raw.errors) && raw.errors.length > 0) {
+      console.warn(`[gitsimilar] GraphQL errors: ${JSON.stringify(raw.errors).slice(0, 1200)}`);
+    }
+
+    const data = raw.data;
+    if (!data || typeof data !== "object") return result;
+
+    for (let i = 0; i < misses.length; i++) {
+      const alias = `repo${i}`;
+      const node = data[alias] as {
+        nameWithOwner?: string;
+        stargazerCount?: number;
+        forkCount?: number;
+        description?: string | null;
+      } | null;
+
+      if (!node || typeof node !== "object") continue;
+
+      const stats: RepoStats = {
+        stargazers_count: typeof node.stargazerCount === "number" ? node.stargazerCount : 0,
+        forks_count: typeof node.forkCount === "number" ? node.forkCount : 0,
+        description:
+          node.description === undefined || node.description === null
+            ? null
+            : typeof node.description === "string"
+              ? node.description
+              : null,
+      };
+
+      const apiKey =
+        typeof node.nameWithOwner === "string" && node.nameWithOwner.length > 0
+          ? node.nameWithOwner.toLowerCase()
+          : misses[i].cacheKey;
+
+      repoStatsCache.set(apiKey, stats);
+      result.set(apiKey, stats);
+      if (apiKey !== misses[i].cacheKey) {
+        repoStatsCache.set(misses[i].cacheKey, stats);
+        result.set(misses[i].cacheKey, stats);
+      }
+    }
+  } catch (e: unknown) {
+    console.warn(
+      `[gitsimilar] batchFetchRepoStats failed: ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+
+  return result;
 }
