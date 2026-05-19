@@ -1,5 +1,17 @@
 import type { Metadata } from "next";
+import { Geist, Space_Grotesk } from "next/font/google";
 import "./globals.css";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const spaceGrotesk = Space_Grotesk({
+  variable: "--font-space-grotesk",
+  subsets: ["latin"],
+  weight: ["500", "700"],
+});
 
 export const metadata: Metadata = {
   title: "GitSimilar — Find similar GitHub repositories",
@@ -18,15 +30,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=DM+Sans:wght@400;500;600&display=swap"
-          rel="stylesheet"
-        />
-      </head>
+    <html
+      lang="en"
+      className={`${geistSans.variable} ${spaceGrotesk.variable} h-full bg-[#fffdf8] antialiased`}
+    >
       <body className="antialiased">{children}</body>
     </html>
   );
