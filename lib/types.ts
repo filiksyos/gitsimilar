@@ -17,10 +17,14 @@ export type SimilarResult = {
   reasoning: string;
   /** Final GitHub `q=` passed to `/search/code`. */
   codeSearchQuery?: string;
-  /** Which root env template file drove the similarity (e.g. `.env.example`). */
+  /** Which root dependency file drove the similarity (e.g. `package.json`). */
   similarityFile?: string;
-  /** Env variable names ultimately used in `codeSearchQuery`. */
-  extractedKeys?: string[];
-  /** All queries attempted (shrinking keys); useful for debugging. */
+  /** All dependency names parsed from the file. */
+  extractedDeps?: string[];
+  /** AND-group deps used in the final query (vendor-locked). */
+  andDeps?: string[];
+  /** OR-group deps used in the final query (substitutable). */
+  orDeps?: string[];
+  /** All queries attempted (shrinking AND deps); useful for debugging. */
   queriesTried?: string[];
 };

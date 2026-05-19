@@ -2,14 +2,14 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { parseRepoInput } from "@/lib/parse-repo";
 import { batchFetchRepoStats, getFileContent, getRootTree, ghFetch, type TreeEntry, toRepo } from "@/lib/github";
-import { parseEnvKeys } from "@/lib/env-extractor";
-import { SIMILARITY_FILES, searchCodeWithRetry } from "@/lib/code-search-query";
+import { parseDeps } from "@/lib/dep-extractor";
+import { DEPENDENCY_FILES, searchCodeWithRetry } from "@/lib/code-search-query";
 import {
   CODE_SEARCH_PER_PAGE,
   GRAPHQL_STATS_BATCH_SIZE,
   MAX_SIMILAR_REPOS,
 } from "@/lib/search-limits";
-import { buildKeySelectionPrompt, parseSelectedKeys } from "@/lib/prompts";
+import { buildDepSelectionPrompt, parseDepSelection } from "@/lib/prompts";
 import { callOpenRouter } from "@/lib/openrouter";
 import type { Repo, SimilarResult } from "@/lib/types";
 
@@ -26,10 +26,10 @@ function shouldLogSearchQueries(): boolean {
   );
 }
 
-function findSimilarityFileAtRoot(tree: TreeEntry[]): string | null {
+function findDependencyFileAtRoot(tree: TreeEntry[]): string | null {
   const blobs = tree.filter((e) => e.type === "blob").map((e) => e.path);
   const blobSet = new Set(blobs);
-  for (const name of SIMILARITY_FILES) {
+  for (const name of DEPENDENCY_FILES) {
     if (blobSet.has(name)) return name;
   }
   return null;
@@ -76,47 +76,47 @@ export async function POST(req: Request): Promise<Response> {
     const source = toRepo(repoData);
 
     const tree = await getRootTree(owner, repo, branch);
-    const similarityFile = findSimilarityFileAtRoot(tree);
-    if (!similarityFile) {
+    const dependencyFile = findDependencyFileAtRoot(tree);
+    if (!dependencyFile) {
       return NextResponse.json(
         {
           error:
-            "No .env.example (or variant such as .env.local.example / .env.template / .env.sample) found at the repository root.",
+            "No dependency file found at the repository root (package.json, requirements.txt, Cargo.toml, go.mod, pyproject.toml, Gemfile, or composer.json).",
         },
         { status: 400 }
       );
     }
 
-    let envRaw: string;
+    let depRaw: string;
     try {
-      envRaw = await getFileContent(owner, repo, similarityFile, branch);
+      depRaw = await getFileContent(owner, repo, dependencyFile, branch);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Could not read env template file.";
+      const msg = e instanceof Error ? e.message : "Could not read dependency file.";
       return NextResponse.json({ error: msg }, { status: 400 });
     }
 
-    const allKeys = parseEnvKeys(envRaw);
-    if (allKeys.length === 0) {
+    const allDeps = parseDeps(depRaw, dependencyFile);
+    if (allDeps.length === 0) {
       return NextResponse.json(
-        { error: "No recognizable environment variables in the template file." },
+        { error: "No recognizable dependencies in the dependency file." },
         { status: 400 }
       );
     }
 
-    const rawPick = await callOpenRouter(buildKeySelectionPrompt(allKeys));
-    const selectedKeys = parseSelectedKeys(rawPick, allKeys);
+    const rawPick = await callOpenRouter(buildDepSelectionPrompt(allDeps));
+    const depSelection = parseDepSelection(rawPick, allDeps);
 
-    if (selectedKeys.length === 0) {
+    if (depSelection.and.length === 0 && depSelection.or.length === 0) {
       return NextResponse.json(
         {
           error:
-            "AI could not select any shared-stack environment keys from this file. Ensure OPENROUTER_API_KEY is configured and retry.",
+            "AI could not classify any dependencies for search. Ensure OPENROUTER_API_KEY is configured and retry.",
         },
         { status: 400 }
       );
     }
 
-    const search = await searchCodeWithRetry(selectedKeys, similarityFile, {
+    const search = await searchCodeWithRetry(depSelection, dependencyFile, {
       maxRetries: 2,
       perPage: CODE_SEARCH_PER_PAGE,
     });
@@ -126,9 +126,9 @@ export async function POST(req: Request): Promise<Response> {
     if (shouldLogSearchQueries()) {
       const div = "=".repeat(72);
       console.log(
-        `\n${div}\n[gitsimilar] Code search (${similarityFile}) for ${source.full_name}\n${div}`
+        `\n${div}\n[gitsimilar] Code search (${dependencyFile}) for ${source.full_name}\n${div}`
       );
-      console.log(JSON.stringify(selectedKeys));
+      console.log(JSON.stringify({ and: depSelection.and, or: depSelection.or }));
       search.queriesTried.forEach((q, i) => console.log(`[try ${i + 1}] ${q}`));
       console.log(
         `[gitsimilar] code hits: ${search.total_count} · deduped repos: ${dedupedCount}`
@@ -155,13 +155,15 @@ export async function POST(req: Request): Promise<Response> {
 
     if (similar.length === 0) {
       throw new Error(
-        "No other repositories matched this env template search. Try loosening secrets in the env file or add more standard provider keys."
+        "No other repositories matched this dependency search. Try a repo with more distinctive vendor dependencies."
       );
     }
 
-    const reasoningParts = [`file: ${similarityFile}`];
-    if (search.keysUsed?.length)
-      reasoningParts.push(`keys: ${search.keysUsed.join(", ")}`);
+    const reasoningParts = [`file: ${dependencyFile}`];
+    if (search.andDepsUsed.length)
+      reasoningParts.push(`AND: ${search.andDepsUsed.join(", ")}`);
+    if (search.orDepsUsed.length)
+      reasoningParts.push(`OR: ${search.orDepsUsed.join(", ")}`);
     reasoningParts.push(
       `${search.total_count.toLocaleString()} code matches on GitHub (up to ${MAX_SIMILAR_REPOS} similar repos below)`
     );
@@ -171,8 +173,10 @@ export async function POST(req: Request): Promise<Response> {
       similar,
       reasoning: reasoningParts.join(" · "),
       codeSearchQuery: search.queryUsed,
-      similarityFile,
-      extractedKeys: search.keysUsed,
+      similarityFile: dependencyFile,
+      extractedDeps: allDeps,
+      andDeps: search.andDepsUsed,
+      orDeps: search.orDepsUsed,
       queriesTried: search.queriesTried,
     };
     return NextResponse.json(payload);

@@ -58,13 +58,13 @@ export default function HomePage() {
         <section className="mx-auto max-w-2xl text-center">
           <div className="mb-6 inline-flex items-center gap-2 rounded-full border-[2px] border-zinc-900 bg-[#f0fdf4] px-3 py-1 text-xs font-semibold text-zinc-800">
             <Github className="h-3 w-3 text-[#16a34a]" />
-            Env-template + GitHub code search discovery
+            Dependency file + GitHub code search discovery
           </div>
           <h2 className="mb-4 text-5xl font-extrabold tracking-tighter text-zinc-900 md:text-7xl">
             Find <span className="text-[#16a34a]">similar</span> repos
           </h2>
           <p className="mb-10 text-lg text-zinc-600">
-            Paste a GitHub repo with a root `.env.example` — we pick shared API keys via AI and find other repos declaring the same stack.
+            Paste a GitHub repo — we read its dependency file, classify stack-defining packages via AI, and find other repos with the same stack.
           </p>
 
           <form onSubmit={onSubmit} className="relative mx-auto max-w-xl">
@@ -170,7 +170,10 @@ function SourceCard({ result }: { result: SimilarResult }) {
             </div>
             <p className="mb-3 text-sm text-zinc-600">{r.description ?? "No description"}</p>
             <p className="mb-3 text-sm italic text-zinc-800">&quot;{result.reasoning}&quot;</p>
-            {(result.codeSearchQuery ?? result.extractedKeys?.length ?? result.queriesTried?.length) && (
+            {(result.codeSearchQuery ??
+              result.andDeps?.length ??
+              result.orDeps?.length ??
+              result.queriesTried?.length) && (
               <details className="mb-3 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-left">
                 <summary className="cursor-pointer text-xs font-semibold text-zinc-600 hover:text-zinc-900">
                   GitHub code search details
@@ -178,22 +181,54 @@ function SourceCard({ result }: { result: SimilarResult }) {
                 <div className="mt-3 space-y-3 text-xs">
                   {result.similarityFile && (
                     <div>
-                      <div className="mb-1 font-medium text-zinc-500">Similarity file</div>
+                      <div className="mb-1 font-medium text-zinc-500">Dependency file</div>
                       <code className="rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px]">
                         {result.similarityFile}
                       </code>
                     </div>
                   )}
-                  {result.extractedKeys && result.extractedKeys.length > 0 && (
+                  {result.extractedDeps && result.extractedDeps.length > 0 && (
                     <div>
-                      <div className="mb-1 font-medium text-zinc-500">Env keys searched</div>
-                      <div className="flex flex-wrap gap-1">
-                        {result.extractedKeys.map((k) => (
+                      <div className="mb-1 font-medium text-zinc-500">
+                        Dependencies found ({result.extractedDeps.length})
+                      </div>
+                      <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto">
+                        {result.extractedDeps.map((d) => (
                           <span
-                            key={k}
+                            key={d}
                             className="rounded-md border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 font-mono text-[10px] text-zinc-800"
                           >
-                            {k}
+                            {d}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {result.andDeps && result.andDeps.length > 0 && (
+                    <div>
+                      <div className="mb-1 font-medium text-zinc-500">AND deps (required)</div>
+                      <div className="flex flex-wrap gap-1">
+                        {result.andDeps.map((d) => (
+                          <span
+                            key={d}
+                            className="rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-mono text-[10px] text-emerald-900"
+                          >
+                            {d}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {result.orDeps && result.orDeps.length > 0 && (
+                    <div>
+                      <div className="mb-1 font-medium text-zinc-500">OR deps (any match)</div>
+                      <div className="flex flex-wrap gap-1">
+                        {result.orDeps.map((d) => (
+                          <span
+                            key={d}
+                            className="rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] text-amber-900"
+                          >
+                            {d}
                           </span>
                         ))}
                       </div>
@@ -209,7 +244,7 @@ function SourceCard({ result }: { result: SimilarResult }) {
                   )}
                   {result.queriesTried && result.queriesTried.length > 1 && (
                     <div>
-                      <div className="mb-1 font-medium text-zinc-500">Retries (dropped least important keys)</div>
+                      <div className="mb-1 font-medium text-zinc-500">Retries (drops OR group first, then AND deps)</div>
                       <div className="max-h-32 space-y-1 overflow-y-auto">
                         {result.queriesTried.map((q, i) => (
                           <pre
