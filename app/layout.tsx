@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Space_Grotesk } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -34,7 +35,10 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${spaceGrotesk.variable} h-full bg-[#fffdf8] antialiased`}
     >
-      <body className="antialiased">{children}</body>
+      <body className="antialiased">
+        {children}
+        <Analytics />
+      </body>
     </html>
   );
 }
