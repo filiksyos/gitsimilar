@@ -4,6 +4,11 @@ import { parseRepoInput } from "@/lib/parse-repo";
 import { batchFetchRepoStats, getFileContent, getRootTree, ghFetch, type TreeEntry, toRepo } from "@/lib/github";
 import { parseEnvKeys } from "@/lib/env-extractor";
 import { SIMILARITY_FILES, searchCodeWithRetry } from "@/lib/code-search-query";
+import {
+  CODE_SEARCH_PER_PAGE,
+  GRAPHQL_STATS_BATCH_SIZE,
+  MAX_SIMILAR_REPOS,
+} from "@/lib/search-limits";
 import { buildKeySelectionPrompt, parseSelectedKeys } from "@/lib/prompts";
 import { callOpenRouter } from "@/lib/openrouter";
 import type { Repo, SimilarResult } from "@/lib/types";
@@ -39,7 +44,7 @@ function finalizeSimilarRepos(candidates: Repo[], sourceFullName: string): Repo[
     if (star !== 0) return star;
     return (a.full_name ?? "").localeCompare(b.full_name ?? "");
   });
-  return filtered.slice(0, 12);
+  return filtered.slice(0, MAX_SIMILAR_REPOS);
 }
 
 export async function POST(req: Request): Promise<Response> {
@@ -113,8 +118,10 @@ export async function POST(req: Request): Promise<Response> {
 
     const search = await searchCodeWithRetry(selectedKeys, similarityFile, {
       maxRetries: 2,
-      perPage: 40,
+      perPage: CODE_SEARCH_PER_PAGE,
     });
+
+    const dedupedCount = search.repos.length;
 
     if (shouldLogSearchQueries()) {
       const div = "=".repeat(72);
@@ -123,16 +130,28 @@ export async function POST(req: Request): Promise<Response> {
       );
       console.log(JSON.stringify(selectedKeys));
       search.queriesTried.forEach((q, i) => console.log(`[try ${i + 1}] ${q}`));
-      console.log(`[gitsimilar] hits: ${search.total_count}\n`);
+      console.log(
+        `[gitsimilar] code hits: ${search.total_count} · deduped repos: ${dedupedCount}`
+      );
     }
 
     const statsMap = await batchFetchRepoStats(search.repos);
+
+    if (shouldLogSearchQueries()) {
+      const graphqlBatches = Math.ceil(dedupedCount / GRAPHQL_STATS_BATCH_SIZE);
+      console.log(`[gitsimilar] GraphQL stats batches (est.): ${graphqlBatches}`);
+    }
+
     const enriched = search.repos.map((r) => {
       const s = statsMap.get(r.full_name.toLowerCase());
       return s ? { ...r, ...s } : r;
     });
 
     const similar = finalizeSimilarRepos(enriched, source.full_name);
+
+    if (shouldLogSearchQueries()) {
+      console.log(`[gitsimilar] returned similar repos: ${similar.length}\n`);
+    }
 
     if (similar.length === 0) {
       throw new Error(
@@ -144,7 +163,7 @@ export async function POST(req: Request): Promise<Response> {
     if (search.keysUsed?.length)
       reasoningParts.push(`keys: ${search.keysUsed.join(", ")}`);
     reasoningParts.push(
-      `${search.total_count.toLocaleString()} code matches on GitHub (deduplicated repos below)`
+      `${search.total_count.toLocaleString()} code matches on GitHub (up to ${MAX_SIMILAR_REPOS} similar repos below)`
     );
 
     const payload: SimilarResult = {

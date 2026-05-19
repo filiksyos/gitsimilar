@@ -1,4 +1,5 @@
 import { reposFromCodeHits, searchCode } from "@/lib/github";
+import { CODE_SEARCH_PER_PAGE } from "@/lib/search-limits";
 import type { Repo } from "@/lib/types";
 
 /** Candidate env template filenames at repository root (order = preference). */
@@ -39,7 +40,7 @@ export async function searchCodeWithRetry(
   options?: { maxRetries?: number; perPage?: number }
 ): Promise<SearchCodeWithRetryResult> {
   const maxRetries = options?.maxRetries ?? 2;
-  const perPage = options?.perPage ?? 40;
+  const perPage = options?.perPage ?? CODE_SEARCH_PER_PAGE;
   const queriesTried: string[] = [];
   let keysWorking = selectedKeys.filter((k) => k.trim());
 

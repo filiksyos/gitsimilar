@@ -111,11 +111,15 @@ export default function HomePage() {
             <SourceCard result={result} />
             <div>
               <h3 className="mb-1 text-2xl font-bold text-zinc-900">Similar repositories</h3>
-              <p className="mb-6 text-sm text-zinc-500">{result.similar.length} matches found</p>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {result.similar.map((r) => (
-                  <RepoCard key={r.id} repo={r} />
-                ))}
+              <p className="mb-6 text-sm text-zinc-500">
+                {result.similar.length} matches found (up to 100)
+              </p>
+              <div className="max-h-[70vh] overflow-y-auto pr-1">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  {result.similar.map((r) => (
+                    <RepoCard key={r.id} repo={r} />
+                  ))}
+                </div>
               </div>
             </div>
           </section>

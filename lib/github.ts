@@ -1,4 +1,5 @@
 import { LRUCache } from "lru-cache";
+import { GRAPHQL_STATS_BATCH_SIZE } from "@/lib/search-limits";
 import type { Repo } from "@/lib/types";
 
 function githubHeaders(): Record<string, string> {
@@ -212,7 +213,7 @@ export type RepoStats = {
 };
 
 const repoStatsCache = new LRUCache<string, RepoStats>({
-  max: 500,
+  max: 1000,
   ttl: 10 * 60 * 1000,
 });
 
@@ -233,16 +234,104 @@ function graphqlPostHeaders(): Record<string, string> {
   };
 }
 
+type RepoStatsMiss = { cacheKey: string; owner: string; name: string };
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
+}
+
 /**
- * Fetches live star/fork/description for repos via one batched GitHub GraphQL request.
+ * One GraphQL batch for a slice of repos. Merges into `result` and cache.
+ * On failure, logs and returns without throwing.
+ */
+async function fetchRepoStatsChunk(
+  misses: RepoStatsMiss[],
+  result: Map<string, RepoStats>
+): Promise<void> {
+  if (misses.length === 0) return;
+
+  const selection = `nameWithOwner stargazerCount forkCount description`;
+  const lines = misses.map(
+    (m, i) =>
+      `repo${i}: repository(owner: "${escapeGraphQlString(m.owner)}", name: "${escapeGraphQlString(m.name)}") { ${selection} }`
+  );
+  const query = `query BatchRepoStats {\n${lines.join("\n")}\n}`;
+
+  const r = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: graphqlPostHeaders(),
+    body: JSON.stringify({ query }),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  const raw = (await r.json().catch(() => ({}))) as {
+    data?: Record<string, unknown>;
+    errors?: unknown[];
+  };
+
+  if (!r.ok) {
+    console.warn(
+      `[gitsimilar] GraphQL HTTP ${r.status}: ${JSON.stringify(raw).slice(0, 800)}`
+    );
+    return;
+  }
+
+  if (Array.isArray(raw.errors) && raw.errors.length > 0) {
+    console.warn(`[gitsimilar] GraphQL errors: ${JSON.stringify(raw.errors).slice(0, 1200)}`);
+  }
+
+  const data = raw.data;
+  if (!data || typeof data !== "object") return;
+
+  for (let i = 0; i < misses.length; i++) {
+    const alias = `repo${i}`;
+    const node = data[alias] as {
+      nameWithOwner?: string;
+      stargazerCount?: number;
+      forkCount?: number;
+      description?: string | null;
+    } | null;
+
+    if (!node || typeof node !== "object") continue;
+
+    const stats: RepoStats = {
+      stargazers_count: typeof node.stargazerCount === "number" ? node.stargazerCount : 0,
+      forks_count: typeof node.forkCount === "number" ? node.forkCount : 0,
+      description:
+        node.description === undefined || node.description === null
+          ? null
+          : typeof node.description === "string"
+            ? node.description
+            : null,
+    };
+
+    const apiKey =
+      typeof node.nameWithOwner === "string" && node.nameWithOwner.length > 0
+        ? node.nameWithOwner.toLowerCase()
+        : misses[i].cacheKey;
+
+    repoStatsCache.set(apiKey, stats);
+    result.set(apiKey, stats);
+    if (apiKey !== misses[i].cacheKey) {
+      repoStatsCache.set(misses[i].cacheKey, stats);
+      result.set(misses[i].cacheKey, stats);
+    }
+  }
+}
+
+/**
+ * Fetches live star/fork/description for repos via chunked GitHub GraphQL requests.
  * Uses an LRU + TTL cache keyed by lowercase `owner/repo`.
  * On HTTP or parse failures, logs and returns a partial map (never throws).
  */
 export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, RepoStats>> {
   const result = new Map<string, RepoStats>();
 
-  type Miss = { cacheKey: string; owner: string; name: string };
-  const misses: Miss[] = [];
+  const misses: RepoStatsMiss[] = [];
   const pendingMissKeys = new Set<string>();
 
   for (const repo of repos) {
@@ -266,73 +355,11 @@ export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, Re
     return result;
   }
 
-  const selection = `nameWithOwner stargazerCount forkCount description`;
-  const lines = misses.map(
-    (m, i) =>
-      `repo${i}: repository(owner: "${escapeGraphQlString(m.owner)}", name: "${escapeGraphQlString(m.name)}") { ${selection} }`
-  );
-  const query = `query BatchRepoStats {\n${lines.join("\n")}\n}`;
+  const chunks = chunkArray(misses, GRAPHQL_STATS_BATCH_SIZE);
 
   try {
-    const r = await fetch("https://api.github.com/graphql", {
-      method: "POST",
-      headers: graphqlPostHeaders(),
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(30_000),
-    });
-
-    const raw = (await r.json().catch(() => ({}))) as {
-      data?: Record<string, unknown>;
-      errors?: unknown[];
-    };
-
-    if (!r.ok) {
-      console.warn(
-        `[gitsimilar] GraphQL HTTP ${r.status}: ${JSON.stringify(raw).slice(0, 800)}`
-      );
-      return result;
-    }
-
-    if (Array.isArray(raw.errors) && raw.errors.length > 0) {
-      console.warn(`[gitsimilar] GraphQL errors: ${JSON.stringify(raw.errors).slice(0, 1200)}`);
-    }
-
-    const data = raw.data;
-    if (!data || typeof data !== "object") return result;
-
-    for (let i = 0; i < misses.length; i++) {
-      const alias = `repo${i}`;
-      const node = data[alias] as {
-        nameWithOwner?: string;
-        stargazerCount?: number;
-        forkCount?: number;
-        description?: string | null;
-      } | null;
-
-      if (!node || typeof node !== "object") continue;
-
-      const stats: RepoStats = {
-        stargazers_count: typeof node.stargazerCount === "number" ? node.stargazerCount : 0,
-        forks_count: typeof node.forkCount === "number" ? node.forkCount : 0,
-        description:
-          node.description === undefined || node.description === null
-            ? null
-            : typeof node.description === "string"
-              ? node.description
-              : null,
-      };
-
-      const apiKey =
-        typeof node.nameWithOwner === "string" && node.nameWithOwner.length > 0
-          ? node.nameWithOwner.toLowerCase()
-          : misses[i].cacheKey;
-
-      repoStatsCache.set(apiKey, stats);
-      result.set(apiKey, stats);
-      if (apiKey !== misses[i].cacheKey) {
-        repoStatsCache.set(misses[i].cacheKey, stats);
-        result.set(misses[i].cacheKey, stats);
-      }
+    for (const chunk of chunks) {
+      await fetchRepoStatsChunk(chunk, result);
     }
   } catch (e: unknown) {
     console.warn(

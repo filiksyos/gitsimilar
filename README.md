@@ -35,7 +35,7 @@ Open [http://localhost:3000](http://localhost:3000).
    `KEY1 KEY2 filename:.env.example NOT is:fork`  
    Using the matched filename (`.env.local.example`, etc.).
 8. **Retry:** If nothing matches, drops the **last** selected key up to twice and repeats.
-9. Deduplicates by repository, excludes the source repo, sorts by GitHub **`stargazers_count`**, keeps up to **12**.
+9. Deduplicates by repository, excludes the source repo, sorts by GitHub **`stargazers_count`**, keeps up to **100** (GraphQL-refreshed stars/forks/description).
 
 Queries follow [Understanding GitHub code search syntax](https://docs.github.com/en/search-github/github-code-search/understanding-github-code-search-syntax).
 
