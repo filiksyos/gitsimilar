@@ -48,17 +48,27 @@ export default function HomePage() {
   return (
     <div className="flex min-h-screen flex-col bg-[#fffdf8] text-zinc-900">
       <header className="sticky top-0 z-50 border-b-[3px] border-zinc-900 bg-[#fffdf8]">
-        <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-4 sm:px-6">
-          <div className="relative">
-            <div className="absolute inset-0 translate-x-0.5 translate-y-0.5 rounded-lg bg-zinc-900" aria-hidden />
-            <div className="relative z-10 flex h-8 w-8 items-center justify-center rounded-lg border-[3px] border-zinc-900 bg-[#16a34a]">
-              <Github className="h-4 w-4 text-white" />
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-3 px-4 sm:px-6">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="relative shrink-0">
+              <div className="absolute inset-0 translate-x-0.5 translate-y-0.5 rounded-lg bg-zinc-900" aria-hidden />
+              <div className="relative z-10 flex h-8 w-8 items-center justify-center rounded-lg border-[3px] border-zinc-900 bg-[#16a34a]">
+                <Github className="h-4 w-4 text-white" />
+              </div>
             </div>
+            <h1 className="font-display text-xl font-bold tracking-tight">
+              <span className="text-zinc-900">git</span>
+              <span className="text-[#16a34a]">similar</span>
+            </h1>
           </div>
-          <h1 className="font-display text-xl font-bold tracking-tight">
-            <span className="text-zinc-900">git</span>
-            <span className="text-[#16a34a]">similar</span>
-          </h1>
+          <a
+            href="https://github.com/filiksyos/gitsimilar"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="shrink-0 text-sm font-medium text-zinc-700 hover:text-zinc-900"
+          >
+            GitHub
+          </a>
         </div>
       </header>
 
