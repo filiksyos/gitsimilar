@@ -1,7 +1,8 @@
-"use client";
+﻿"use client";
 
-import { useState, type FormEvent, type ReactNode } from "react";
-import { Star, GitFork, Search, Github, Loader2, ExternalLink } from "lucide-react";
+import { useState, useRef, useEffect, type FormEvent, type ReactNode } from "react";
+import { Star, GitFork, Search, Github, Loader2 } from "lucide-react";
+import { HOME_EXAMPLES } from "@/lib/home-example-repos";
 import type { SimilarResult } from "@/lib/types";
 
 export default function HomePage() {
@@ -9,6 +10,13 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SimilarResult | null>(null);
+  const resultsRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (result) {
+      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [result]);
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -56,30 +64,25 @@ export default function HomePage() {
 
       <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-12 px-4 py-12 sm:px-6">
         <section className="mx-auto max-w-2xl text-center">
-          <div className="mb-6 inline-flex items-center gap-2 rounded-full border-[2px] border-zinc-900 bg-[#f0fdf4] px-3 py-1 text-xs font-semibold text-zinc-800">
-            <Github className="h-3 w-3 text-[#16a34a]" />
-            Dependency file + GitHub code search discovery
-          </div>
           <h2 className="mb-4 text-5xl font-extrabold tracking-tighter text-zinc-900 md:text-7xl">
             Find <span className="text-[#16a34a]">similar</span> repos
           </h2>
           <p className="mb-10 text-lg text-zinc-600">
-            Paste a GitHub repo — we read its dependency file, classify stack-defining packages via AI, and find other repos with the same stack.
+            Find other repos with the same tech stack.
           </p>
 
           <form onSubmit={onSubmit} className="relative mx-auto max-w-xl">
             <div className="absolute inset-0 translate-x-2 translate-y-2 rounded-xl bg-zinc-900" aria-hidden />
-            <div className="relative z-10 rounded-xl border-[3px] border-zinc-900 bg-[#f0fdf4] p-4 sm:p-5">
+            <div className="relative z-10 rounded-xl border-[3px] border-zinc-900 bg-[#f0fdf4] p-4 text-left sm:p-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-stretch sm:gap-3">
                 <div className="relative min-w-0 flex-1">
                   <div className="absolute inset-0 translate-x-1 translate-y-1 rounded-lg bg-zinc-900" aria-hidden />
-                  <div className="relative z-10 flex items-center gap-2 rounded-lg border-[3px] border-zinc-900 bg-white px-3 py-2.5">
-                    <Github className="h-5 w-5 shrink-0 text-zinc-500" />
+                  <div className="relative z-10 w-full rounded-lg border-[3px] border-zinc-900 bg-white px-3 py-2.5">
                     <input
                       value={input}
                       onChange={(e) => setInput(e.target.value)}
-                      placeholder="owner/repo or https://github.com/owner/repo"
-                      className="min-w-0 flex-1 border-0 bg-transparent py-0.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-500"
+                      placeholder="https://github.com/..."
+                      className="block w-full border-0 bg-transparent py-0.5 text-left text-sm text-zinc-900 outline-none placeholder:text-left placeholder:text-zinc-500"
                       disabled={loading}
                     />
                   </div>
@@ -96,182 +99,52 @@ export default function HomePage() {
                   </button>
                 </div>
               </div>
+              {!loading && (
+                <div className="mt-4 flex flex-wrap justify-start gap-2 text-left">
+                  <span className="w-full text-left text-sm text-zinc-600">Try example repos:</span>
+                  {HOME_EXAMPLES.map(({ label, url }) => (
+                    <div key={url} className="group relative">
+                      <div className="absolute inset-0 translate-x-0.5 translate-y-0.5 rounded bg-zinc-900" aria-hidden />
+                      <button
+                        type="button"
+                        onClick={() => setInput(url)}
+                        className="relative z-10 rounded border-[3px] border-zinc-900 bg-[#d1fae5] px-3 py-1 text-sm font-medium text-zinc-900 transition-transform hover:bg-[#16a34a] hover:text-white group-hover:-translate-x-px group-hover:-translate-y-px"
+                      >
+                        {label}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {error && (
+                <p className="mt-3 text-sm text-red-600" role="alert">
+                  {error}
+                </p>
+              )}
             </div>
           </form>
-
-          {error && (
-            <div className="mt-4 inline-block rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600">
-              {error}
-            </div>
-          )}
+          <p className="mt-4 text-center text-sm text-zinc-500">
+            You can also replace{" "}
+            <code className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-xs text-zinc-700">hub</code> with{" "}
+            <code className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-xs text-zinc-700">similar</code> in any
+            GitHub URL.
+          </p>
         </section>
 
         {result && (
-          <section className="space-y-8">
-            <SourceCard result={result} />
-            <div>
-              <h3 className="mb-1 text-2xl font-bold text-zinc-900">Similar repositories</h3>
-              <p className="mb-6 text-sm text-zinc-500">
-                {result.similar.length} matches found (up to 100)
-              </p>
-              <div className="max-h-[70vh] overflow-y-auto pr-1">
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {result.similar.map((r) => (
-                    <RepoCard key={r.id} repo={r} />
-                  ))}
-                </div>
-              </div>
+          <section ref={resultsRef} className="scroll-mt-8">
+            <h3 className="mb-1 text-2xl font-bold text-zinc-900">Similar repositories</h3>
+            <p className="mb-6 text-sm text-zinc-500">
+              {result.similar.length} {result.similar.length === 1 ? "match" : "matches"} found
+            </p>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {result.similar.map((r) => (
+                <RepoCard key={r.id} repo={r} />
+              ))}
             </div>
-          </section>
-        )}
-
-        {!result && !loading && (
-          <section className="mx-auto mt-0 grid max-w-2xl grid-cols-2 gap-3 md:grid-cols-4">
-            {["facebook/react", "vercel/next.js", "tailwindlabs/tailwindcss", "tanstack/query"].map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setInput(s)}
-                className="truncate rounded-lg border-[2px] border-zinc-900 bg-[#d1fae5] px-3 py-2 text-xs font-medium text-zinc-900 transition-colors hover:bg-[#16a34a] hover:text-white"
-              >
-                {s}
-              </button>
-            ))}
           </section>
         )}
       </main>
-
-      <footer className="border-t border-zinc-200 py-6 text-center text-sm text-zinc-500">
-        GitSimilar — discover repos that share your stack
-      </footer>
-    </div>
-  );
-}
-
-function SourceCard({ result }: { result: SimilarResult }) {
-  const r = result.source;
-  return (
-    <div className="group relative">
-      <div className="absolute inset-0 translate-x-2 translate-y-2 rounded-2xl bg-zinc-900" aria-hidden />
-      <div className="relative z-10 rounded-2xl border-[3px] border-zinc-900 bg-[#f0fdf4] p-6">
-        <div className="flex items-start gap-4">
-          <img src={r.owner.avatar_url} alt={r.owner.login} className="h-12 w-12 rounded-lg border-[2px] border-zinc-900" />
-          <div className="min-w-0 flex-1">
-            <div className="mb-1 flex items-center gap-2">
-              <a
-                href={r.html_url}
-                target="_blank"
-                rel="noreferrer"
-                className="font-display truncate text-lg font-bold text-zinc-900 hover:text-[#16a34a]"
-              >
-                {r.full_name}
-              </a>
-              <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
-            </div>
-            <p className="mb-3 text-sm text-zinc-600">{r.description ?? "No description"}</p>
-            <p className="mb-3 text-sm italic text-zinc-800">&quot;{result.reasoning}&quot;</p>
-            {(result.codeSearchQuery ??
-              result.andDeps?.length ??
-              result.orDeps?.length ??
-              result.queriesTried?.length) && (
-              <details className="mb-3 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-left">
-                <summary className="cursor-pointer text-xs font-semibold text-zinc-600 hover:text-zinc-900">
-                  GitHub code search details
-                </summary>
-                <div className="mt-3 space-y-3 text-xs">
-                  {result.similarityFile && (
-                    <div>
-                      <div className="mb-1 font-medium text-zinc-500">Dependency file</div>
-                      <code className="rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px]">
-                        {result.similarityFile}
-                      </code>
-                    </div>
-                  )}
-                  {result.extractedDeps && result.extractedDeps.length > 0 && (
-                    <div>
-                      <div className="mb-1 font-medium text-zinc-500">
-                        Dependencies found ({result.extractedDeps.length})
-                      </div>
-                      <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto">
-                        {result.extractedDeps.map((d) => (
-                          <span
-                            key={d}
-                            className="rounded-md border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 font-mono text-[10px] text-zinc-800"
-                          >
-                            {d}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {result.andDeps && result.andDeps.length > 0 && (
-                    <div>
-                      <div className="mb-1 font-medium text-zinc-500">AND deps (required)</div>
-                      <div className="flex flex-wrap gap-1">
-                        {result.andDeps.map((d) => (
-                          <span
-                            key={d}
-                            className="rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-mono text-[10px] text-emerald-900"
-                          >
-                            {d}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {result.orDeps && result.orDeps.length > 0 && (
-                    <div>
-                      <div className="mb-1 font-medium text-zinc-500">OR deps (any match)</div>
-                      <div className="flex flex-wrap gap-1">
-                        {result.orDeps.map((d) => (
-                          <span
-                            key={d}
-                            className="rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] text-amber-900"
-                          >
-                            {d}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {result.codeSearchQuery && (
-                    <div>
-                      <div className="mb-1 font-medium text-zinc-500">Final query (`q=`)</div>
-                      <pre className="whitespace-pre-wrap break-words rounded-md border border-zinc-200 bg-zinc-50 p-2 text-[11px] leading-relaxed text-zinc-800">
-                        {result.codeSearchQuery.trim()}
-                      </pre>
-                    </div>
-                  )}
-                  {result.queriesTried && result.queriesTried.length > 1 && (
-                    <div>
-                      <div className="mb-1 font-medium text-zinc-500">Retries (drops OR group first, then AND deps)</div>
-                      <div className="max-h-32 space-y-1 overflow-y-auto">
-                        {result.queriesTried.map((q, i) => (
-                          <pre
-                            key={i}
-                            className="whitespace-pre-wrap break-words rounded-md border border-zinc-200 bg-zinc-50 p-2 text-[10px] leading-relaxed text-zinc-800"
-                          >
-                            {q}
-                          </pre>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </details>
-            )}
-            <div className="flex flex-wrap gap-3 text-xs text-zinc-600">
-              <Stat icon={<Star className="h-3 w-3" />} value={r.stargazers_count.toLocaleString()} />
-              <Stat icon={<GitFork className="h-3 w-3" />} value={r.forks_count.toLocaleString()} />
-              {r.language && (
-                <span className="rounded-md border-[2px] border-zinc-900 bg-zinc-100 px-2 py-0.5 font-medium text-zinc-900">
-                  {r.language}
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
