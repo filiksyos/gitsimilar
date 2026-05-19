@@ -130,11 +130,11 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
                   <span className="w-full text-left text-sm text-zinc-600">Try example repos:</span>
                   {HOME_EXAMPLES.map(({ label, url }) => (
                     <div key={url} className="group relative">
-                      <div className="absolute inset-0 translate-x-0.5 translate-y-0.5 rounded bg-zinc-900" aria-hidden />
+                      <div className="absolute inset-0 translate-x-0.5 translate-y-0.5 rounded-lg bg-zinc-900" aria-hidden />
                       <button
                         type="button"
                         onClick={() => setInput(url)}
-                        className="relative z-10 rounded border-[3px] border-zinc-900 bg-[#d1fae5] px-3 py-1 text-sm font-medium text-zinc-900 transition-transform hover:bg-[#16a34a] hover:text-white group-hover:-translate-x-px group-hover:-translate-y-px"
+                        className="relative z-10 rounded-lg border-[3px] border-zinc-900 bg-[#d1fae5] px-3 py-1 text-sm font-medium text-zinc-900 transition-transform hover:bg-[#16a34a] hover:text-white group-hover:-translate-x-px group-hover:-translate-y-px"
                       >
                         {label}
                       </button>

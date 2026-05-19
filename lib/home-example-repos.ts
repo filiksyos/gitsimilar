@@ -4,5 +4,4 @@ export const HOME_EXAMPLES = [
   { label: "Openclaw", url: "https://github.com/openclaw/openclaw" },
   { label: "React", url: "https://github.com/facebook/react" },
   { label: "Supabase", url: "https://github.com/supabase/supabase" },
-  { label: "Linux", url: "https://github.com/torvalds/linux" },
 ] as const;
