@@ -3,11 +3,16 @@
 import { useState, useRef, useEffect, type FormEvent, type ReactNode } from "react";
 import { Star, GitFork, Search, Github, Loader2 } from "lucide-react";
 import { HOME_EXAMPLES } from "@/lib/home-example-repos";
-import type { SimilarResult } from "@/lib/types";
+import type { SearchEvent, SimilarResult } from "@/lib/types";
 
 export interface SimilarHomeProps {
   initialRepo?: string;
   autoSubmit?: boolean;
+}
+
+function formatSearchStep(event: Extract<SearchEvent, { type: "search" }>): string {
+  const label = event.mode === "github" ? "GitHub search" : "Web search";
+  return `${label}: ${event.query}`;
 }
 
 export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false }: SimilarHomeProps) {
@@ -15,6 +20,8 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SimilarResult | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [searchSteps, setSearchSteps] = useState<string[]>([]);
   const resultsRef = useRef<HTMLElement>(null);
   const autoSubmittedRef = useRef(false);
 
@@ -28,23 +35,78 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
     setError(null);
     setLoading(true);
     setResult(null);
+    setStatusMessage("Starting search...");
+    setSearchSteps([]);
+
     try {
       const res = await fetch("/api/find-similar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ input: repoInput }),
       });
-      const data: unknown = await res.json().catch(() => ({}));
-      if (!res.ok) {
+
+      if (!res.ok && !res.body) {
+        const data: unknown = await res.json().catch(() => ({}));
         const msg =
           typeof data === "object" && data !== null && "error" in data
             ? String((data as { error: unknown }).error)
             : `Request failed (${res.status})`;
         throw new Error(msg);
       }
-      setResult(data as SimilarResult);
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        throw new Error("Streaming response not available.");
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finished = false;
+
+      while (!finished) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const payload = line.slice(6).trim();
+          if (!payload) continue;
+
+          let event: SearchEvent;
+          try {
+            event = JSON.parse(payload) as SearchEvent;
+          } catch {
+            continue;
+          }
+
+          if (event.type === "status") {
+            setStatusMessage(event.message);
+          } else if (event.type === "search") {
+            setSearchSteps((prev) => [...prev, formatSearchStep(event)]);
+          } else if (event.type === "result") {
+            setResult({
+              source: event.source,
+              similar: event.similar,
+              reasoning: event.reasoning,
+            });
+            setStatusMessage(null);
+            finished = true;
+          } else if (event.type === "error") {
+            throw new Error(event.message);
+          }
+        }
+      }
+
+      if (!finished) {
+        throw new Error("Search ended before results were returned.");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
+      setStatusMessage(null);
     } finally {
       setLoading(false);
     }
@@ -94,7 +156,7 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
             Find <span className="text-[#16a34a]">similar</span> repos
           </h2>
           <p className="mb-10 text-lg text-zinc-600">
-            Find other repos with the same tech stack.
+            Discover related open-source projects with agentic web search.
           </p>
 
           <form onSubmit={onSubmit} className="relative mx-auto max-w-xl">
@@ -125,6 +187,23 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
                   </button>
                 </div>
               </div>
+              {loading && (
+                <div className="mt-4 space-y-2 text-left">
+                  {statusMessage && (
+                    <p className="flex items-center gap-2 text-sm text-zinc-600">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                      {statusMessage}
+                    </p>
+                  )}
+                  {searchSteps.length > 0 && (
+                    <ul className="max-h-32 space-y-1 overflow-y-auto text-xs text-zinc-500">
+                      {searchSteps.map((step, i) => (
+                        <li key={`${step}-${i}`}>{step}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
               {!loading && (
                 <div className="mt-4 flex flex-wrap justify-start gap-2 text-left">
                   <span className="w-full text-left text-sm text-zinc-600">Try example repos:</span>
@@ -165,7 +244,7 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
             </p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
               {result.similar.map((r) => (
-                <RepoCard key={r.id} repo={r} />
+                <RepoCard key={r.id || r.full_name} repo={r} />
               ))}
             </div>
           </section>
@@ -189,7 +268,11 @@ function RepoCard({ repo }: { repo: SimilarResult["similar"][number] }) {
         className="relative z-10 flex h-full min-h-[180px] -translate-x-0.5 -translate-y-0.5 flex-col rounded-xl border-[3px] border-zinc-900 bg-white p-5 transition-transform duration-100 group-hover:-translate-x-1 group-hover:-translate-y-1"
       >
         <div className="mb-3 flex items-center gap-3">
-          <img src={repo.owner.avatar_url} alt="" className="h-8 w-8 rounded-md border-[2px] border-zinc-900" />
+          {repo.owner.avatar_url ? (
+            <img src={repo.owner.avatar_url} alt="" className="h-8 w-8 rounded-md border-[2px] border-zinc-900" />
+          ) : (
+            <div className="h-8 w-8 rounded-md border-[2px] border-zinc-900 bg-zinc-100" />
+          )}
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold text-zinc-900 transition group-hover:text-[#16a34a]">
               {repo.full_name}

@@ -32,161 +32,6 @@ export async function ghFetch(url: string): Promise<unknown> {
   return data;
 }
 
-/** One entry from `GET .../git/trees/:sha` (non-recursive). */
-export type TreeEntry = {
-  path: string;
-  type: "blob" | "tree" | "commit";
-  sha: string;
-};
-
-export type RepoBranchRef = {
-  sha: string;
-};
-
-/**
- * Root listing via Git Trees API (branch HEAD → commit → tree SHA → tree).
- */
-export async function getRootTree(
-  owner: string,
-  repo: string,
-  branch: string
-): Promise<TreeEntry[]> {
-  const branchesUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches/${encodeURIComponent(branch)}`;
-  const branchJson = await ghFetch(branchesUrl) as {
-    commit?: RepoBranchRef | { sha?: string };
-  };
-
-  let commitSha: string | undefined;
-  if (
-    typeof branchJson?.commit === "object" &&
-    branchJson.commit &&
-    typeof (branchJson.commit as RepoBranchRef).sha === "string"
-  ) {
-    commitSha = (branchJson.commit as RepoBranchRef).sha;
-  }
-
-  if (!commitSha?.trim()) throw new Error("Could not resolve default branch for repository.");
-
-  const commitUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits/${encodeURIComponent(commitSha)}`;
-  const commitData = (await ghFetch(commitUrl)) as { tree?: { sha?: string } };
-  const treeSha = typeof commitData?.tree?.sha === "string" ? commitData.tree.sha : "";
-  if (!treeSha.trim()) throw new Error("Could not resolve repository tree.");
-
-  const treeUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(treeSha)}`;
-  const treeData = (await ghFetch(treeUrl)) as { tree?: TreeEntry[] };
-  return Array.isArray(treeData.tree) ? treeData.tree : [];
-}
-
-/** File body from Contents API (base64 decoding). Throws on failure. */
-export async function getFileContent(owner: string, repo: string, path: string, branch: string): Promise<string> {
-  const encodedPath = path
-    .split("/")
-    .filter(Boolean)
-    .map((s) => encodeURIComponent(s))
-    .join("/");
-  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`;
-
-  const { ok, status, data } = await ghJson(url);
-  if (status === 404) throw new Error(`File "${path}" not found in repository.`);
-  if (!ok) {
-    if (status === 403) throw new Error("GitHub API rate limit reached. Try again in a minute.");
-    throw new Error(`GitHub error (${status})`);
-  }
-
-  const file = data as {
-    encoding?: string;
-    content?: string;
-    /** Symlinks / dirs return type !== file */
-    type?: string;
-  };
-  if (file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string") {
-    throw new Error(`Could not load file "${path}" as text.`);
-  }
-
-  try {
-    return Buffer.from(file.content.replace(/\s/g, ""), "base64").toString("utf-8");
-  } catch {
-    throw new Error(`Could not decode file "${path}".`);
-  }
-}
-
-const GITHUB_CODE_SEARCH_URL = "https://api.github.com/search/code";
-
-export type CodeSearchHit = {
-  path: string;
-  repository: Record<string, unknown>;
-};
-
-/**
- * Code search (`/search/code`). Authenticated requests required for reliable results.
- */
-export async function searchCode(
-  query: string,
-  perPage = 30
-): Promise<{ items: CodeSearchHit[]; total_count: number }> {
-  const trimmed = query.trim();
-  if (!trimmed) return { items: [], total_count: 0 };
-
-  if (!process.env.GITHUB_TOKEN?.trim()) {
-    throw new Error(
-      "GitHub code search requires GITHUB_TOKEN. Add a token to .env.local for higher limits and guaranteed access."
-    );
-  }
-
-  const url = new URL(GITHUB_CODE_SEARCH_URL);
-  url.searchParams.set("q", trimmed);
-  url.searchParams.set("per_page", String(Math.min(100, Math.max(1, perPage))));
-
-  const r = await fetch(url.toString(), {
-    headers: githubHeaders(),
-    signal: AbortSignal.timeout(30_000),
-  });
-
-  const data = (await r.json().catch(() => ({}))) as {
-    items?: CodeSearchHit[];
-    total_count?: number;
-    message?: string;
-  };
-
-  if (!r.ok) {
-    if (r.status === 403) {
-      throw new Error("GitHub API rate limit reached. Try again in a minute.");
-    }
-    if (r.status === 401 || r.status === 422) {
-      const msg =
-        typeof data.message === "string"
-          ? data.message
-          : "GitHub code search failed — check GITHUB_TOKEN and query syntax.";
-      throw new Error(msg);
-    }
-    console.warn(
-      `[gitsimilar] GitHub code search HTTP ${r.status} for query: ${trimmed.slice(0, 120)}`
-    );
-    return { items: [], total_count: 0 };
-  }
-
-  return {
-    items: Array.isArray(data.items) ? data.items : [],
-    total_count: data.total_count ?? 0,
-  };
-}
-
-/** Map code hits to repos, preserving first-hit order per `full_name`. */
-export function reposFromCodeHits(hits: CodeSearchHit[]): Repo[] {
-  const seen = new Set<string>();
-  const out: Repo[] = [];
-  for (const hit of hits) {
-    const row = hit.repository;
-    if (!row || typeof row !== "object") continue;
-    const repo = toRepo(row);
-    const key = repo.full_name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(repo);
-  }
-  return out;
-}
-
 export function toRepo(r: Record<string, unknown>): Repo {
   const owner = r.owner as Record<string, unknown> | undefined;
   return {
@@ -203,6 +48,32 @@ export function toRepo(r: Record<string, unknown>): Repo {
       avatar_url: (owner?.avatar_url as string | undefined) ?? "",
     },
   };
+}
+
+/** Fetch repo metadata for each full_name; skips repos that 404 or fail. */
+export async function fetchReposByFullNames(fullNames: string[]): Promise<Repo[]> {
+  const results = await Promise.all(
+    fullNames.map(async (fullName) => {
+      const slash = fullName.indexOf("/");
+      if (slash <= 0) return null;
+      const owner = fullName.slice(0, slash);
+      const repo = fullName.slice(slash + 1);
+      try {
+        const data = (await ghFetch(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+        )) as Record<string, unknown>;
+        return toRepo(data);
+      } catch (e) {
+        console.warn(
+          `[gitsimilar] Could not fetch repo ${fullName}:`,
+          e instanceof Error ? e.message : e
+        );
+        return null;
+      }
+    })
+  );
+
+  return results.filter((repo): repo is Repo => repo !== null);
 }
 
 /** Stats merged into `Repo` after batched GraphQL lookup (see `batchFetchRepoStats`). */
@@ -244,10 +115,6 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-/**
- * One GraphQL batch for a slice of repos. Merges into `result` and cache.
- * On failure, logs and returns without throwing.
- */
 async function fetchRepoStatsChunk(
   misses: RepoStatsMiss[],
   result: Map<string, RepoStats>
@@ -323,11 +190,6 @@ async function fetchRepoStatsChunk(
   }
 }
 
-/**
- * Fetches live star/fork/description for repos via chunked GitHub GraphQL requests.
- * Uses an LRU + TTL cache keyed by lowercase `owner/repo`.
- * On HTTP or parse failures, logs and returns a partial map (never throws).
- */
 export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, RepoStats>> {
   const result = new Map<string, RepoStats>();
 
