@@ -1,6 +1,8 @@
 import { LRUCache } from "lru-cache";
-import { GRAPHQL_STATS_BATCH_SIZE } from "@/lib/search-limits";
+import { GITHUB_SEARCH_MAX, GRAPHQL_STATS_BATCH_SIZE } from "@/lib/search-limits";
 import type { Repo } from "@/lib/types";
+
+const README_MAX_BYTES = 2048;
 
 function githubHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
@@ -32,12 +34,65 @@ export async function ghFetch(url: string): Promise<unknown> {
   return data;
 }
 
+export type GitHubSearchHit = {
+  full_name: string;
+  description: string | null;
+  stargazers_count: number;
+  language: string | null;
+};
+
+/** Search GitHub repositories via REST search API (sorted by stars). */
+export async function searchRepositories(
+  query: string,
+  limit = 10
+): Promise<GitHubSearchHit[]> {
+  const url = new URL("https://api.github.com/search/repositories");
+  url.searchParams.set("q", query);
+  url.searchParams.set("per_page", String(Math.min(Math.max(limit, 1), GITHUB_SEARCH_MAX)));
+  url.searchParams.set("sort", "stars");
+
+  const { ok, status, data } = await ghJson(url.toString());
+  if (!ok) {
+    if (status === 403) throw new Error("GitHub search rate limit reached.");
+    throw new Error(`GitHub search error (${status})`);
+  }
+
+  const items = (data as { items?: unknown[] }).items ?? [];
+  const out: GitHubSearchHit[] = [];
+
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const fullName = r.full_name;
+    if (typeof fullName !== "string" || !fullName.includes("/")) continue;
+    out.push({
+      full_name: fullName,
+      description:
+        r.description === null || r.description === undefined
+          ? null
+          : typeof r.description === "string"
+            ? r.description
+            : null,
+      stargazers_count:
+        typeof r.stargazers_count === "number" ? r.stargazers_count : 0,
+      language:
+        r.language === null || r.language === undefined
+          ? null
+          : typeof r.language === "string"
+            ? r.language
+            : null,
+    });
+  }
+
+  return out;
+}
+
 export function toRepo(r: Record<string, unknown>): Repo {
   const owner = r.owner as Record<string, unknown> | undefined;
   return {
-    id: r.id as number,
+    id: (r.id as number | undefined) ?? 0,
     full_name: r.full_name as string,
-    html_url: r.html_url as string,
+    html_url: (r.html_url as string | undefined) ?? `https://github.com/${r.full_name}`,
     description: (r.description as string | null) ?? null,
     stargazers_count: (r.stargazers_count as number | undefined) ?? 0,
     forks_count: (r.forks_count as number | undefined) ?? 0,
@@ -50,37 +105,53 @@ export function toRepo(r: Record<string, unknown>): Repo {
   };
 }
 
-/** Fetch repo metadata for each full_name; skips repos that 404 or fail. */
-export async function fetchReposByFullNames(fullNames: string[]): Promise<Repo[]> {
-  const results = await Promise.all(
-    fullNames.map(async (fullName) => {
-      const slash = fullName.indexOf("/");
-      if (slash <= 0) return null;
-      const owner = fullName.slice(0, slash);
-      const repo = fullName.slice(slash + 1);
-      try {
-        const data = (await ghFetch(
-          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
-        )) as Record<string, unknown>;
-        return toRepo(data);
-      } catch (e) {
-        console.warn(
-          `[gitsimilar] Could not fetch repo ${fullName}:`,
-          e instanceof Error ? e.message : e
-        );
-        return null;
-      }
-    })
-  );
+/** Fetch README content via GitHub API; returns empty string on failure. */
+export async function fetchRepoReadme(owner: string, repo: string): Promise<string> {
+  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/readme`;
 
-  return results.filter((repo): repo is Repo => repo !== null);
+  try {
+    const rawRes = await fetch(url, {
+      headers: {
+        ...githubHeaders(),
+        Accept: "application/vnd.github.raw",
+      },
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (rawRes.ok) {
+      const text = await rawRes.text();
+      return text.slice(0, README_MAX_BYTES);
+    }
+
+    const { ok, data } = await ghJson(url);
+    if (!ok) return "";
+
+    const json = data as { content?: string; encoding?: string };
+    if (json.content && json.encoding === "base64") {
+      const decoded = Buffer.from(json.content, "base64").toString("utf-8");
+      return decoded.slice(0, README_MAX_BYTES);
+    }
+
+    return "";
+  } catch (e) {
+    console.warn(
+      `[gitsimilar] README fetch failed for ${owner}/${repo}:`,
+      e instanceof Error ? e.message : e
+    );
+    return "";
+  }
 }
 
-/** Stats merged into `Repo` after batched GraphQL lookup (see `batchFetchRepoStats`). */
+/** Stats merged into `Repo` after batched GraphQL lookup. */
 export type RepoStats = {
   stargazers_count: number;
   forks_count: number;
   description: string | null;
+  language: string | null;
+  html_url: string | null;
+  ownerLogin: string | null;
+  ownerAvatarUrl: string | null;
+  topics: string[];
 };
 
 const repoStatsCache = new LRUCache<string, RepoStats>({
@@ -105,8 +176,6 @@ function graphqlPostHeaders(): Record<string, string> {
   };
 }
 
-type RepoStatsMiss = { cacheKey: string; owner: string; name: string };
-
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < arr.length; i += size) {
@@ -115,18 +184,30 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-async function fetchRepoStatsChunk(
-  misses: RepoStatsMiss[],
+type RepoBatchMiss = { cacheKey: string; owner: string; name: string };
+
+async function fetchRepoBatchChunk(
+  misses: RepoBatchMiss[],
   result: Map<string, RepoStats>
 ): Promise<void> {
   if (misses.length === 0) return;
 
-  const selection = `nameWithOwner stargazerCount forkCount description`;
+  const selection = `
+    nameWithOwner
+    url
+    stargazerCount
+    forkCount
+    description
+    primaryLanguage { name }
+    repositoryTopics(first: 10) { nodes { topic { name } } }
+    owner { login avatarUrl }
+  `;
+
   const lines = misses.map(
     (m, i) =>
       `repo${i}: repository(owner: "${escapeGraphQlString(m.owner)}", name: "${escapeGraphQlString(m.name)}") { ${selection} }`
   );
-  const query = `query BatchRepoStats {\n${lines.join("\n")}\n}`;
+  const query = `query BatchRepos {\n${lines.join("\n")}\n}`;
 
   const r = await fetch("https://api.github.com/graphql", {
     method: "POST",
@@ -158,12 +239,21 @@ async function fetchRepoStatsChunk(
     const alias = `repo${i}`;
     const node = data[alias] as {
       nameWithOwner?: string;
+      url?: string;
       stargazerCount?: number;
       forkCount?: number;
       description?: string | null;
+      primaryLanguage?: { name?: string } | null;
+      repositoryTopics?: { nodes?: Array<{ topic?: { name?: string } }> };
+      owner?: { login?: string; avatarUrl?: string };
     } | null;
 
     if (!node || typeof node !== "object") continue;
+
+    const topics =
+      node.repositoryTopics?.nodes
+        ?.map((n) => n.topic?.name)
+        .filter((t): t is string => typeof t === "string") ?? [];
 
     const stats: RepoStats = {
       stargazers_count: typeof node.stargazerCount === "number" ? node.stargazerCount : 0,
@@ -174,6 +264,11 @@ async function fetchRepoStatsChunk(
           : typeof node.description === "string"
             ? node.description
             : null,
+      language: node.primaryLanguage?.name ?? null,
+      html_url: typeof node.url === "string" ? node.url : null,
+      ownerLogin: node.owner?.login ?? null,
+      ownerAvatarUrl: node.owner?.avatarUrl ?? null,
+      topics,
     };
 
     const apiKey =
@@ -190,20 +285,21 @@ async function fetchRepoStatsChunk(
   }
 }
 
-export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, RepoStats>> {
+async function batchFetchRepoDataMap(
+  fullNames: string[]
+): Promise<Map<string, RepoStats>> {
   const result = new Map<string, RepoStats>();
-
-  const misses: RepoStatsMiss[] = [];
+  const misses: RepoBatchMiss[] = [];
   const pendingMissKeys = new Set<string>();
 
-  for (const repo of repos) {
-    const cacheKey = repo.full_name.toLowerCase();
+  for (const fullName of fullNames) {
+    const cacheKey = fullName.toLowerCase();
     const cached = repoStatsCache.get(cacheKey);
     if (cached) {
       result.set(cacheKey, cached);
       continue;
     }
-    const parsed = parseOwnerRepo(repo.full_name);
+    const parsed = parseOwnerRepo(fullName);
     if (!parsed) continue;
     if (pendingMissKeys.has(cacheKey)) continue;
     pendingMissKeys.add(cacheKey);
@@ -213,21 +309,61 @@ export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, Re
   if (misses.length === 0) return result;
 
   if (!process.env.GITHUB_TOKEN?.trim()) {
-    console.warn("[gitsimilar] batchFetchRepoStats: GITHUB_TOKEN missing; skipping GraphQL enrichment.");
+    console.warn("[gitsimilar] GITHUB_TOKEN missing; GraphQL batch skipped.");
     return result;
   }
 
   const chunks = chunkArray(misses, GRAPHQL_STATS_BATCH_SIZE);
-
   try {
     for (const chunk of chunks) {
-      await fetchRepoStatsChunk(chunk, result);
+      await fetchRepoBatchChunk(chunk, result);
     }
   } catch (e: unknown) {
     console.warn(
-      `[gitsimilar] batchFetchRepoStats failed: ${e instanceof Error ? e.message : String(e)}`
+      `[gitsimilar] batchFetchRepoDataMap failed: ${e instanceof Error ? e.message : String(e)}`
     );
   }
 
   return result;
+}
+
+function statsToRepo(fullName: string, stats: RepoStats, index: number): Repo {
+  const [owner, repo] = fullName.split("/");
+  return {
+    id: index,
+    full_name: fullName,
+    html_url: stats.html_url ?? `https://github.com/${fullName}`,
+    description: stats.description,
+    stargazers_count: stats.stargazers_count,
+    forks_count: stats.forks_count,
+    language: stats.language,
+    topics: stats.topics,
+    owner: {
+      login: stats.ownerLogin ?? owner,
+      avatar_url: stats.ownerAvatarUrl ?? "",
+    },
+  };
+}
+
+/**
+ * Fetch repo metadata for each full_name via a single GraphQL batch per chunk.
+ * Skips repos that 404 or are missing from GraphQL response.
+ */
+export async function batchFetchReposByNames(fullNames: string[]): Promise<Repo[]> {
+  const statsMap = await batchFetchRepoDataMap(fullNames);
+  const repos: Repo[] = [];
+  let index = 0;
+
+  for (const fullName of fullNames) {
+    const stats = statsMap.get(fullName.toLowerCase());
+    if (!stats) continue;
+    repos.push(statsToRepo(fullName, stats, index++));
+  }
+
+  return repos;
+}
+
+/** @deprecated Use batchFetchReposByNames — kept for any external imports */
+export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, RepoStats>> {
+  return batchFetchRepoDataMap(repos.map((r) => r.full_name));
 }

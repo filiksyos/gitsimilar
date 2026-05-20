@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, type FormEvent, type ReactNode } from "react";
-import { Star, GitFork, Search, Github, Loader2 } from "lucide-react";
+import { Star, GitFork, Search, Github, Loader2, ExternalLink } from "lucide-react";
 import { HOME_EXAMPLES } from "@/lib/home-example-repos";
 import type { SearchEvent, SimilarResult } from "@/lib/types";
 
@@ -10,9 +10,32 @@ export interface SimilarHomeProps {
   autoSubmit?: boolean;
 }
 
-function formatSearchStep(event: Extract<SearchEvent, { type: "search" }>): string {
-  const label = event.mode === "github" ? "GitHub search" : "Web search";
-  return `${label}: ${event.query}`;
+type ActivityStep =
+  | { kind: "search"; query: string; count: number }
+  | { kind: "github_search"; query: string; count: number }
+  | { kind: "scrape"; url: string; reposFound: number };
+
+function formatActivityStep(step: ActivityStep): { label: string; detail: string; sub?: string } {
+  if (step.kind === "search") {
+    return {
+      label: "Searched web",
+      detail: step.query,
+      sub: `${step.count} results`,
+    };
+  }
+  if (step.kind === "github_search") {
+    return {
+      label: "Searched GitHub",
+      detail: step.query,
+      sub: `${step.count} repos`,
+    };
+  }
+  const host = step.url.replace(/^https?:\/\//, "").split("/").slice(0, 3).join("/");
+  return {
+    label: "Opened page",
+    detail: host,
+    sub: step.reposFound > 0 ? `${step.reposFound} repo links found` : undefined,
+  };
 }
 
 export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false }: SimilarHomeProps) {
@@ -21,7 +44,7 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SimilarResult | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [searchSteps, setSearchSteps] = useState<string[]>([]);
+  const [activitySteps, setActivitySteps] = useState<ActivityStep[]>([]);
   const resultsRef = useRef<HTMLElement>(null);
   const autoSubmittedRef = useRef(false);
 
@@ -36,7 +59,7 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
     setLoading(true);
     setResult(null);
     setStatusMessage("Starting search...");
-    setSearchSteps([]);
+    setActivitySteps([]);
 
     try {
       const res = await fetch("/api/find-similar", {
@@ -86,7 +109,20 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
           if (event.type === "status") {
             setStatusMessage(event.message);
           } else if (event.type === "search") {
-            setSearchSteps((prev) => [...prev, formatSearchStep(event)]);
+            setActivitySteps((prev) => [
+              ...prev,
+              { kind: "search", query: event.query, count: event.count },
+            ]);
+          } else if (event.type === "github_search") {
+            setActivitySteps((prev) => [
+              ...prev,
+              { kind: "github_search", query: event.query, count: event.count },
+            ]);
+          } else if (event.type === "scrape") {
+            setActivitySteps((prev) => [
+              ...prev,
+              { kind: "scrape", url: event.url, reposFound: event.reposFound },
+            ]);
           } else if (event.type === "result") {
             setResult({
               source: event.source,
@@ -188,18 +224,27 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
                 </div>
               </div>
               {loading && (
-                <div className="mt-4 space-y-2 text-left">
+                <div className="mt-4 space-y-3 text-left">
                   {statusMessage && (
-                    <p className="flex items-center gap-2 text-sm text-zinc-600">
+                    <p className="flex items-center gap-2 text-sm font-medium text-zinc-700">
                       <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
                       {statusMessage}
                     </p>
                   )}
-                  {searchSteps.length > 0 && (
-                    <ul className="max-h-32 space-y-1 overflow-y-auto text-xs text-zinc-500">
-                      {searchSteps.map((step, i) => (
-                        <li key={`${step}-${i}`}>{step}</li>
-                      ))}
+                  {activitySteps.length > 0 && (
+                    <ul className="max-h-48 space-y-2 overflow-y-auto border-t border-zinc-200 pt-3">
+                      {activitySteps.map((step, i) => {
+                        const formatted = formatActivityStep(step);
+                        return (
+                          <li key={`${formatted.label}-${i}`} className="text-xs">
+                            <div className="font-semibold text-zinc-700">{formatted.label}</div>
+                            <div className="mt-0.5 truncate text-zinc-600">{formatted.detail}</div>
+                            {formatted.sub && (
+                              <div className="text-zinc-400">{formatted.sub}</div>
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>
@@ -241,6 +286,7 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
             <h3 className="mb-1 text-2xl font-bold text-zinc-900">Similar repositories</h3>
             <p className="mb-6 text-sm text-zinc-500">
               {result.similar.length} {result.similar.length === 1 ? "match" : "matches"} found
+              {result.reasoning ? ` · ${result.reasoning}` : ""}
             </p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
               {result.similar.map((r) => (
@@ -279,6 +325,7 @@ function RepoCard({ repo }: { repo: SimilarResult["similar"][number] }) {
             </div>
             {repo.language && <div className="text-xs text-zinc-500">{repo.language}</div>}
           </div>
+          <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-400 opacity-0 transition group-hover:opacity-100" />
         </div>
         <p className="mb-3 flex-1 text-xs text-zinc-600 line-clamp-3">{repo.description ?? "No description"}</p>
         <div className="flex items-center gap-3 text-xs text-zinc-600">

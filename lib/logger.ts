@@ -1,9 +1,38 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-export type SearchLogEntry = {
+export type FirecrawlSearchResultItem = {
+  position: number;
+  title: string;
+  url: string;
+  description: string;
+};
+
+export type SearchLogSearchEntry = {
   query: string;
-  mode: "github" | "web";
+  results: FirecrawlSearchResultItem[];
+  foundNames: string[];
+  error: string | null;
+  durationMs: number;
+};
+
+export type SearchLogScrapeEntry = {
+  url: string;
+  foundNames: string[];
+  error: string | null;
+  durationMs: number;
+};
+
+export type SearchLogGithubResultItem = {
+  full_name: string;
+  description: string | null;
+  stargazers_count: number;
+  language: string | null;
+};
+
+export type SearchLogGithubEntry = {
+  query: string;
+  results: SearchLogGithubResultItem[];
   foundNames: string[];
   error: string | null;
   durationMs: number;
@@ -19,11 +48,14 @@ export type SearchLogSimilarRepo = {
 export type SearchLog = {
   timestamp: string;
   source: string;
-  queries: string[];
-  searches: SearchLogEntry[];
-  candidateNames: string[];
+  readmeChars: number;
+  searches: SearchLogSearchEntry[];
+  githubSearches: SearchLogGithubEntry[];
+  scrapes: SearchLogScrapeEntry[];
+  agentSimilarNames: string[];
   similar: SearchLogSimilarRepo[];
   reasoning: string | null;
+  toolCalls: number;
   totalDurationMs: number;
   error: string | null;
 };
@@ -36,11 +68,14 @@ function shouldWriteSearchLogs(): boolean {
 
 function formatLogTimestamp(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
-  return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate()),
-  ].join("-") + `_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
+  return (
+    [
+      date.getFullYear(),
+      pad(date.getMonth() + 1),
+      pad(date.getDate()),
+    ].join("-") +
+    `_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`
+  );
 }
 
 function sanitizeFilenamePart(value: string): string {

@@ -19,6 +19,8 @@ export type SimilarResult = {
 
 export type SearchEvent =
   | { type: "status"; message: string }
-  | { type: "search"; query: string; mode: "github" | "web"; index: number }
+  | { type: "search"; query: string; count: number }
+  | { type: "github_search"; query: string; count: number }
+  | { type: "scrape"; url: string; reposFound: number }
   | { type: "result"; source: Repo; similar: Repo[]; reasoning: string }
   | { type: "error"; message: string };
