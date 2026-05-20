@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@mendable/firecrawl-js": "^4.24.2",
     "@vercel/analytics": "^2.0.1",
     "lru-cache": "^11.4.0",
     "lucide-react": "^0.575.0",

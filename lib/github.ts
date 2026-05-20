@@ -1,6 +1,8 @@
 import { LRUCache } from "lru-cache";
-import { GRAPHQL_STATS_BATCH_SIZE } from "@/lib/search-limits";
+import { GITHUB_SEARCH_MAX, GRAPHQL_STATS_BATCH_SIZE } from "@/lib/search-limits";
 import type { Repo } from "@/lib/types";
+
+const README_MAX_BYTES = 2048;
 
 function githubHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
@@ -32,167 +34,65 @@ export async function ghFetch(url: string): Promise<unknown> {
   return data;
 }
 
-/** One entry from `GET .../git/trees/:sha` (non-recursive). */
-export type TreeEntry = {
-  path: string;
-  type: "blob" | "tree" | "commit";
-  sha: string;
+export type GitHubSearchHit = {
+  full_name: string;
+  description: string | null;
+  stargazers_count: number;
+  language: string | null;
 };
 
-export type RepoBranchRef = {
-  sha: string;
-};
-
-/**
- * Root listing via Git Trees API (branch HEAD → commit → tree SHA → tree).
- */
-export async function getRootTree(
-  owner: string,
-  repo: string,
-  branch: string
-): Promise<TreeEntry[]> {
-  const branchesUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches/${encodeURIComponent(branch)}`;
-  const branchJson = await ghFetch(branchesUrl) as {
-    commit?: RepoBranchRef | { sha?: string };
-  };
-
-  let commitSha: string | undefined;
-  if (
-    typeof branchJson?.commit === "object" &&
-    branchJson.commit &&
-    typeof (branchJson.commit as RepoBranchRef).sha === "string"
-  ) {
-    commitSha = (branchJson.commit as RepoBranchRef).sha;
-  }
-
-  if (!commitSha?.trim()) throw new Error("Could not resolve default branch for repository.");
-
-  const commitUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits/${encodeURIComponent(commitSha)}`;
-  const commitData = (await ghFetch(commitUrl)) as { tree?: { sha?: string } };
-  const treeSha = typeof commitData?.tree?.sha === "string" ? commitData.tree.sha : "";
-  if (!treeSha.trim()) throw new Error("Could not resolve repository tree.");
-
-  const treeUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(treeSha)}`;
-  const treeData = (await ghFetch(treeUrl)) as { tree?: TreeEntry[] };
-  return Array.isArray(treeData.tree) ? treeData.tree : [];
-}
-
-/** File body from Contents API (base64 decoding). Throws on failure. */
-export async function getFileContent(owner: string, repo: string, path: string, branch: string): Promise<string> {
-  const encodedPath = path
-    .split("/")
-    .filter(Boolean)
-    .map((s) => encodeURIComponent(s))
-    .join("/");
-  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`;
-
-  const { ok, status, data } = await ghJson(url);
-  if (status === 404) throw new Error(`File "${path}" not found in repository.`);
-  if (!ok) {
-    if (status === 403) throw new Error("GitHub API rate limit reached. Try again in a minute.");
-    throw new Error(`GitHub error (${status})`);
-  }
-
-  const file = data as {
-    encoding?: string;
-    content?: string;
-    /** Symlinks / dirs return type !== file */
-    type?: string;
-  };
-  if (file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string") {
-    throw new Error(`Could not load file "${path}" as text.`);
-  }
-
-  try {
-    return Buffer.from(file.content.replace(/\s/g, ""), "base64").toString("utf-8");
-  } catch {
-    throw new Error(`Could not decode file "${path}".`);
-  }
-}
-
-const GITHUB_CODE_SEARCH_URL = "https://api.github.com/search/code";
-
-export type CodeSearchHit = {
-  path: string;
-  repository: Record<string, unknown>;
-};
-
-/**
- * Code search (`/search/code`). Authenticated requests required for reliable results.
- */
-export async function searchCode(
+/** Search GitHub repositories via REST search API (sorted by stars). */
+export async function searchRepositories(
   query: string,
-  perPage = 30
-): Promise<{ items: CodeSearchHit[]; total_count: number }> {
-  const trimmed = query.trim();
-  if (!trimmed) return { items: [], total_count: 0 };
+  limit = 10
+): Promise<GitHubSearchHit[]> {
+  const url = new URL("https://api.github.com/search/repositories");
+  url.searchParams.set("q", query);
+  url.searchParams.set("per_page", String(Math.min(Math.max(limit, 1), GITHUB_SEARCH_MAX)));
+  url.searchParams.set("sort", "stars");
 
-  if (!process.env.GITHUB_TOKEN?.trim()) {
-    throw new Error(
-      "GitHub code search requires GITHUB_TOKEN. Add a token to .env.local for higher limits and guaranteed access."
-    );
+  const { ok, status, data } = await ghJson(url.toString());
+  if (!ok) {
+    if (status === 403) throw new Error("GitHub search rate limit reached.");
+    throw new Error(`GitHub search error (${status})`);
   }
 
-  const url = new URL(GITHUB_CODE_SEARCH_URL);
-  url.searchParams.set("q", trimmed);
-  url.searchParams.set("per_page", String(Math.min(100, Math.max(1, perPage))));
+  const items = (data as { items?: unknown[] }).items ?? [];
+  const out: GitHubSearchHit[] = [];
 
-  const r = await fetch(url.toString(), {
-    headers: githubHeaders(),
-    signal: AbortSignal.timeout(30_000),
-  });
-
-  const data = (await r.json().catch(() => ({}))) as {
-    items?: CodeSearchHit[];
-    total_count?: number;
-    message?: string;
-  };
-
-  if (!r.ok) {
-    if (r.status === 403) {
-      throw new Error("GitHub API rate limit reached. Try again in a minute.");
-    }
-    if (r.status === 401 || r.status === 422) {
-      const msg =
-        typeof data.message === "string"
-          ? data.message
-          : "GitHub code search failed — check GITHUB_TOKEN and query syntax.";
-      throw new Error(msg);
-    }
-    console.warn(
-      `[gitsimilar] GitHub code search HTTP ${r.status} for query: ${trimmed.slice(0, 120)}`
-    );
-    return { items: [], total_count: 0 };
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const fullName = r.full_name;
+    if (typeof fullName !== "string" || !fullName.includes("/")) continue;
+    out.push({
+      full_name: fullName,
+      description:
+        r.description === null || r.description === undefined
+          ? null
+          : typeof r.description === "string"
+            ? r.description
+            : null,
+      stargazers_count:
+        typeof r.stargazers_count === "number" ? r.stargazers_count : 0,
+      language:
+        r.language === null || r.language === undefined
+          ? null
+          : typeof r.language === "string"
+            ? r.language
+            : null,
+    });
   }
 
-  return {
-    items: Array.isArray(data.items) ? data.items : [],
-    total_count: data.total_count ?? 0,
-  };
-}
-
-/** Map code hits to repos, preserving first-hit order per `full_name`. */
-export function reposFromCodeHits(hits: CodeSearchHit[]): Repo[] {
-  const seen = new Set<string>();
-  const out: Repo[] = [];
-  for (const hit of hits) {
-    const row = hit.repository;
-    if (!row || typeof row !== "object") continue;
-    const repo = toRepo(row);
-    const key = repo.full_name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(repo);
-  }
   return out;
 }
 
 export function toRepo(r: Record<string, unknown>): Repo {
   const owner = r.owner as Record<string, unknown> | undefined;
   return {
-    id: r.id as number,
+    id: (r.id as number | undefined) ?? 0,
     full_name: r.full_name as string,
-    html_url: r.html_url as string,
+    html_url: (r.html_url as string | undefined) ?? `https://github.com/${r.full_name}`,
     description: (r.description as string | null) ?? null,
     stargazers_count: (r.stargazers_count as number | undefined) ?? 0,
     forks_count: (r.forks_count as number | undefined) ?? 0,
@@ -205,11 +105,53 @@ export function toRepo(r: Record<string, unknown>): Repo {
   };
 }
 
-/** Stats merged into `Repo` after batched GraphQL lookup (see `batchFetchRepoStats`). */
+/** Fetch README content via GitHub API; returns empty string on failure. */
+export async function fetchRepoReadme(owner: string, repo: string): Promise<string> {
+  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/readme`;
+
+  try {
+    const rawRes = await fetch(url, {
+      headers: {
+        ...githubHeaders(),
+        Accept: "application/vnd.github.raw",
+      },
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (rawRes.ok) {
+      const text = await rawRes.text();
+      return text.slice(0, README_MAX_BYTES);
+    }
+
+    const { ok, data } = await ghJson(url);
+    if (!ok) return "";
+
+    const json = data as { content?: string; encoding?: string };
+    if (json.content && json.encoding === "base64") {
+      const decoded = Buffer.from(json.content, "base64").toString("utf-8");
+      return decoded.slice(0, README_MAX_BYTES);
+    }
+
+    return "";
+  } catch (e) {
+    console.warn(
+      `[gitsimilar] README fetch failed for ${owner}/${repo}:`,
+      e instanceof Error ? e.message : e
+    );
+    return "";
+  }
+}
+
+/** Stats merged into `Repo` after batched GraphQL lookup. */
 export type RepoStats = {
   stargazers_count: number;
   forks_count: number;
   description: string | null;
+  language: string | null;
+  html_url: string | null;
+  ownerLogin: string | null;
+  ownerAvatarUrl: string | null;
+  topics: string[];
 };
 
 const repoStatsCache = new LRUCache<string, RepoStats>({
@@ -234,8 +176,6 @@ function graphqlPostHeaders(): Record<string, string> {
   };
 }
 
-type RepoStatsMiss = { cacheKey: string; owner: string; name: string };
-
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < arr.length; i += size) {
@@ -244,22 +184,30 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-/**
- * One GraphQL batch for a slice of repos. Merges into `result` and cache.
- * On failure, logs and returns without throwing.
- */
-async function fetchRepoStatsChunk(
-  misses: RepoStatsMiss[],
+type RepoBatchMiss = { cacheKey: string; owner: string; name: string };
+
+async function fetchRepoBatchChunk(
+  misses: RepoBatchMiss[],
   result: Map<string, RepoStats>
 ): Promise<void> {
   if (misses.length === 0) return;
 
-  const selection = `nameWithOwner stargazerCount forkCount description`;
+  const selection = `
+    nameWithOwner
+    url
+    stargazerCount
+    forkCount
+    description
+    primaryLanguage { name }
+    repositoryTopics(first: 10) { nodes { topic { name } } }
+    owner { login avatarUrl }
+  `;
+
   const lines = misses.map(
     (m, i) =>
       `repo${i}: repository(owner: "${escapeGraphQlString(m.owner)}", name: "${escapeGraphQlString(m.name)}") { ${selection} }`
   );
-  const query = `query BatchRepoStats {\n${lines.join("\n")}\n}`;
+  const query = `query BatchRepos {\n${lines.join("\n")}\n}`;
 
   const r = await fetch("https://api.github.com/graphql", {
     method: "POST",
@@ -291,12 +239,21 @@ async function fetchRepoStatsChunk(
     const alias = `repo${i}`;
     const node = data[alias] as {
       nameWithOwner?: string;
+      url?: string;
       stargazerCount?: number;
       forkCount?: number;
       description?: string | null;
+      primaryLanguage?: { name?: string } | null;
+      repositoryTopics?: { nodes?: Array<{ topic?: { name?: string } }> };
+      owner?: { login?: string; avatarUrl?: string };
     } | null;
 
     if (!node || typeof node !== "object") continue;
+
+    const topics =
+      node.repositoryTopics?.nodes
+        ?.map((n) => n.topic?.name)
+        .filter((t): t is string => typeof t === "string") ?? [];
 
     const stats: RepoStats = {
       stargazers_count: typeof node.stargazerCount === "number" ? node.stargazerCount : 0,
@@ -307,6 +264,11 @@ async function fetchRepoStatsChunk(
           : typeof node.description === "string"
             ? node.description
             : null,
+      language: node.primaryLanguage?.name ?? null,
+      html_url: typeof node.url === "string" ? node.url : null,
+      ownerLogin: node.owner?.login ?? null,
+      ownerAvatarUrl: node.owner?.avatarUrl ?? null,
+      topics,
     };
 
     const apiKey =
@@ -323,25 +285,21 @@ async function fetchRepoStatsChunk(
   }
 }
 
-/**
- * Fetches live star/fork/description for repos via chunked GitHub GraphQL requests.
- * Uses an LRU + TTL cache keyed by lowercase `owner/repo`.
- * On HTTP or parse failures, logs and returns a partial map (never throws).
- */
-export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, RepoStats>> {
+async function batchFetchRepoDataMap(
+  fullNames: string[]
+): Promise<Map<string, RepoStats>> {
   const result = new Map<string, RepoStats>();
-
-  const misses: RepoStatsMiss[] = [];
+  const misses: RepoBatchMiss[] = [];
   const pendingMissKeys = new Set<string>();
 
-  for (const repo of repos) {
-    const cacheKey = repo.full_name.toLowerCase();
+  for (const fullName of fullNames) {
+    const cacheKey = fullName.toLowerCase();
     const cached = repoStatsCache.get(cacheKey);
     if (cached) {
       result.set(cacheKey, cached);
       continue;
     }
-    const parsed = parseOwnerRepo(repo.full_name);
+    const parsed = parseOwnerRepo(fullName);
     if (!parsed) continue;
     if (pendingMissKeys.has(cacheKey)) continue;
     pendingMissKeys.add(cacheKey);
@@ -351,21 +309,140 @@ export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, Re
   if (misses.length === 0) return result;
 
   if (!process.env.GITHUB_TOKEN?.trim()) {
-    console.warn("[gitsimilar] batchFetchRepoStats: GITHUB_TOKEN missing; skipping GraphQL enrichment.");
+    console.warn("[gitsimilar] GITHUB_TOKEN missing; GraphQL batch skipped.");
     return result;
   }
 
   const chunks = chunkArray(misses, GRAPHQL_STATS_BATCH_SIZE);
-
   try {
     for (const chunk of chunks) {
-      await fetchRepoStatsChunk(chunk, result);
+      await fetchRepoBatchChunk(chunk, result);
     }
   } catch (e: unknown) {
     console.warn(
-      `[gitsimilar] batchFetchRepoStats failed: ${e instanceof Error ? e.message : String(e)}`
+      `[gitsimilar] batchFetchRepoDataMap failed: ${e instanceof Error ? e.message : String(e)}`
     );
   }
 
   return result;
+}
+
+function statsToRepo(fullName: string, stats: RepoStats, index: number): Repo {
+  const [owner, repo] = fullName.split("/");
+  return {
+    id: index,
+    full_name: fullName,
+    html_url: stats.html_url ?? `https://github.com/${fullName}`,
+    description: stats.description,
+    stargazers_count: stats.stargazers_count,
+    forks_count: stats.forks_count,
+    language: stats.language,
+    topics: stats.topics,
+    owner: {
+      login: stats.ownerLogin ?? owner,
+      avatar_url: stats.ownerAvatarUrl ?? "",
+    },
+  };
+}
+
+/**
+ * Fetch repo metadata for each full_name via a single GraphQL batch per chunk.
+ * Skips repos that 404 or are missing from GraphQL response.
+ */
+export async function batchFetchReposByNames(fullNames: string[]): Promise<Repo[]> {
+  const statsMap = await batchFetchRepoDataMap(fullNames);
+  const repos: Repo[] = [];
+  let index = 0;
+
+  for (const fullName of fullNames) {
+    const stats = statsMap.get(fullName.toLowerCase());
+    if (!stats) continue;
+    repos.push(statsToRepo(fullName, stats, index++));
+  }
+
+  return repos;
+}
+
+const METADATA_SEARCH_FALLBACK_LIMIT = 3;
+
+export type ResolveReposResult = {
+  resolved: Repo[];
+  notFound: string[];
+  searchSuggestions: Map<string, GitHubSearchHit[]>;
+};
+
+/**
+ * Resolve candidate slugs to real GitHub metadata via GraphQL batch.
+ * For slugs that do not exist, falls back to GitHub search and returns suggestions.
+ * All fetched stats are stored in repoStatsCache for reuse by batchFetchReposByNames.
+ */
+export async function resolveAndFetchRepos(
+  candidates: string[]
+): Promise<ResolveReposResult> {
+  const unique = [
+    ...new Set(
+      candidates
+        .map((c) => c.trim())
+        .filter((c) => c.includes("/"))
+    ),
+  ];
+
+  const statsMap = await batchFetchRepoDataMap(unique);
+  const resolved: Repo[] = [];
+  const notFound: string[] = [];
+  const searchSuggestions = new Map<string, GitHubSearchHit[]>();
+  const unresolved: string[] = [];
+  const resolvedKeys = new Set<string>();
+  let index = 0;
+
+  for (const fullName of unique) {
+    const key = fullName.toLowerCase();
+    const stats = statsMap.get(key);
+    if (stats) {
+      resolved.push(statsToRepo(fullName, stats, index++));
+      resolvedKeys.add(key);
+      continue;
+    }
+    unresolved.push(fullName);
+  }
+
+  for (const slug of unresolved) {
+    const repoPart = slug.split("/").pop() ?? slug;
+    const query = repoPart.replace(/-/g, " ");
+
+    try {
+      const hits = await searchRepositories(query, METADATA_SEARCH_FALLBACK_LIMIT);
+      if (hits.length === 0) {
+        notFound.push(slug);
+        continue;
+      }
+
+      searchSuggestions.set(slug, hits);
+
+      const hitNames = hits.map((h) => h.full_name);
+      const hitStatsMap = await batchFetchRepoDataMap(hitNames);
+
+      for (const hit of hits) {
+        const hitKey = hit.full_name.toLowerCase();
+        const hitStats = hitStatsMap.get(hitKey);
+        if (hitStats && !resolvedKeys.has(hitKey)) {
+          resolved.push(statsToRepo(hit.full_name, hitStats, index++));
+          resolvedKeys.add(hitKey);
+        }
+      }
+    } catch (e) {
+      console.warn(
+        `[gitsimilar] resolveAndFetchRepos search fallback failed for ${slug}:`,
+        e instanceof Error ? e.message : e
+      );
+      notFound.push(slug);
+    }
+  }
+
+  return { resolved, notFound, searchSuggestions };
+}
+
+/** @deprecated Use batchFetchReposByNames — kept for any external imports */
+export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, RepoStats>> {
+  return batchFetchRepoDataMap(repos.map((r) => r.full_name));
 }

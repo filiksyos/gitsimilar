@@ -1,8 +1,23 @@
-/** GitHub REST /search/code max per_page. */
-export const CODE_SEARCH_PER_PAGE = 100;
-
 /** Max similar repos returned from /api/find-similar. */
 export const MAX_SIMILAR_REPOS = 9;
 
-/** Repos per batched GraphQL stats query (avoids complexity limits). */
+/** Repos per batched GraphQL query (avoids complexity limits). */
 export const GRAPHQL_STATS_BATCH_SIZE = 40;
+
+/** Max tool calls per agentic search run (web_search, github_search, scrape_page). */
+export const MAX_AGENT_TOOL_CALLS = 7;
+
+/** Default GitHub search results per github_search call. */
+export const GITHUB_SEARCH_LIMIT = 20;
+
+/** Max GitHub search results per call. */
+export const GITHUB_SEARCH_MAX = 30;
+
+/** Default Firecrawl search result limit per web_search call. */
+export const FIRECRAWL_SEARCH_LIMIT = 10;
+
+/** Max markdown chars returned from scrape_page to the LLM. */
+export const SCRAPE_MARKDOWN_MAX_CHARS = 8000;
+
+/** Max chars for a repo/search-result description passed to the LLM. */
+export const MAX_DESCRIPTION_CHARS = 120;

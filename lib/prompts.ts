@@ -1,38 +1,55 @@
+import fs from "fs";
+import path from "path";
 import type { OpenRouterMessage } from "@/lib/openrouter";
 
-export type DepSelection = {
-  and: string[];
-  or: string[];
+export type RepoQueryContext = {
+  full_name: string;
+  name: string;
+  description: string | null;
+  language: string | null;
+  stars: number;
 };
 
-/** Classify dependency names into AND (vendor-locked) vs OR (substitutable) groups. */
-const SELECT_DEPS_SYSTEM =
-  "You are helping find GitHub repositories that use a similar technology stack.\n" +
-  "You will receive a JSON array of dependency/package NAMES from ONE repository's dependency file " +
-  "(package.json, requirements.txt, Cargo.toml, etc.).\n\n" +
-  "Task: Classify dependencies into two groups for a GitHub code search query:\n\n" +
-  "**and** — vendor-locked dependencies with no realistic substitute that uses a different package name. " +
-  "Every similar repo doing the same thing will have these exact names. " +
-  "Examples: stripe, @supabase/supabase-js, grammy, @modelcontextprotocol/sdk, resend.\n\n" +
-  "**or** — substitutable dependencies where similar repos might pick a different package for the same need. " +
-  "At least one should appear in matches, but the specific name may differ. " +
-  "Examples: framer-motion (vs gsap), lucide-react (vs react-icons), openai (vs @google/genai).\n\n" +
-  "Rules:\n" +
-  "- Skip generic toolchain deps that appear in thousands of projects (react, react-dom, next, typescript, eslint, tailwindcss, chalk, commander, dotenv, axios, lodash, undici, zod unless it is clearly central to the app's purpose).\n" +
-  "- Skip private or scoped packages unlikely to appear in other repos (@openclaw/*, @earendil-works/*, etc.).\n" +
-  "- Only pick names present in the input list. Preserve exact spelling and casing.\n" +
-  "- Put at least 1 item in **and** when possible. Use **or** for nice-to-have signals.\n" +
-  "- Order **and** from most distinctive/stack-defining first to most generic last (last can be dropped on retry).\n" +
-  "- Max 3 in **and**, max 4 in **or**.\n\n" +
-  "Return ONLY valid JSON, no markdown, no prose. Example:\n" +
-  '{"and":["stripe","@supabase/supabase-js"],"or":["framer-motion","posthog-js"]}';
+const MAX_README_CHARS = 2048;
 
-export function buildDepSelectionPrompt(allDeps: string[]): OpenRouterMessage[] {
+export function truncateReadme(readme: string): string {
+  const trimmed = readme.trim();
+  if (trimmed.length <= MAX_README_CHARS) return trimmed;
+  return `${trimmed.slice(0, MAX_README_CHARS)}\n\n[README truncated]`;
+}
+
+let _systemPromptTemplate: string | null = null;
+
+function loadSystemPromptTemplate(): string {
+  if (!_systemPromptTemplate) {
+    const filePath = path.join(process.cwd(), "lib", "prompts", "system.md");
+    _systemPromptTemplate = fs.readFileSync(filePath, "utf-8");
+  }
+  return _systemPromptTemplate;
+}
+
+export function buildAgentSystemPrompt(
+  repo: RepoQueryContext,
+  readmeTruncated: string
+): string {
+  return loadSystemPromptTemplate()
+    .replace(/\{\{FULL_NAME\}\}/g, repo.full_name)
+    .replace(/\{\{DESCRIPTION\}\}/g, repo.description ?? "(none)")
+    .replace(/\{\{LANGUAGE\}\}/g, repo.language ?? "(unknown)")
+    .replace(/\{\{STARS\}\}/g, repo.stars.toLocaleString())
+    .replace(/\{\{README\}\}/g, readmeTruncated || "(no README content)");
+}
+
+export function buildAgentInitialMessages(
+  repo: RepoQueryContext,
+  readmeTruncated: string
+): OpenRouterMessage[] {
   return [
-    { role: "system", content: SELECT_DEPS_SYSTEM },
+    { role: "system", content: buildAgentSystemPrompt(repo, readmeTruncated) },
     {
       role: "user",
-      content: JSON.stringify(allDeps.sort((a, b) => a.localeCompare(b))),
+      content:
+        `Find repositories similar to ${repo.full_name}. Use the available tools to discover direct alternatives, then return the ranked JSON.`,
     },
   ];
 }
@@ -44,34 +61,23 @@ function stripJsonFences(raw: string): string {
   return s.trim();
 }
 
-function filterAllowed(names: unknown, allowed: Set<string>, max: number): string[] {
-  if (!Array.isArray(names)) return [];
-  const out: string[] = [];
-  for (const item of names) {
-    if (typeof item !== "string") continue;
-    const name = item.trim();
-    if (!name || !allowed.has(name)) continue;
-    if (!out.includes(name)) out.push(name);
-    if (out.length >= max) break;
-  }
-  return out;
-}
-
-/** Parse LLM JSON object; validate every entry exists in the original dep set. */
-export function parseDepSelection(raw: string, allDeps: string[]): DepSelection {
-  const allowed = new Set(allDeps);
-  let parsed: unknown;
+/** Parse agent final output: {"similar":["owner/repo",...]} */
+export function parseSimilarJson(raw: string): string[] {
+  const cleaned = stripJsonFences(raw);
   try {
-    parsed = JSON.parse(stripJsonFences(raw));
+    const parsed = JSON.parse(cleaned) as { similar?: unknown; candidates?: unknown };
+    const list = parsed.similar ?? parsed.candidates;
+    if (!Array.isArray(list)) return [];
+    const out: string[] = [];
+    for (const item of list) {
+      if (typeof item !== "string") continue;
+      const name = item.trim();
+      if (!name.includes("/")) continue;
+      const key = name.toLowerCase();
+      if (!out.some((x) => x.toLowerCase() === key)) out.push(name);
+    }
+    return out;
   } catch {
-    console.warn("[gitsimilar] Failed to parse dep-selection JSON");
-    return { and: [], or: [] };
+    return [];
   }
-  if (!parsed || typeof parsed !== "object") return { and: [], or: [] };
-
-  const obj = parsed as Record<string, unknown>;
-  return {
-    and: filterAllowed(obj.and, allowed, 3),
-    or: filterAllowed(obj.or, allowed, 4),
-  };
 }
