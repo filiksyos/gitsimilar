@@ -3,6 +3,7 @@ import {
   batchFetchReposByNames,
   fetchRepoReadme,
   ghFetch,
+  resolveAndFetchRepos,
   searchRepositories,
   toRepo,
   type GitHubSearchHit,
@@ -32,6 +33,7 @@ import {
   FIRECRAWL_SEARCH_LIMIT,
   GITHUB_SEARCH_LIMIT,
   MAX_AGENT_TOOL_CALLS,
+  MAX_DESCRIPTION_CHARS,
   MAX_SIMILAR_REPOS,
   SCRAPE_MARKDOWN_MAX_CHARS,
 } from "@/lib/search-limits";
@@ -79,10 +81,6 @@ const AGENT_TOOLS: OpenRouterToolDefinition[] = [
             description:
               "GitHub search query (supports qualifiers like language:typescript, stars:>100)",
           },
-          limit: {
-            type: "number",
-            description: "Number of results (default 10, max 30)",
-          },
         },
         required: ["query"],
       },
@@ -98,10 +96,6 @@ const AGENT_TOOLS: OpenRouterToolDefinition[] = [
         type: "object",
         properties: {
           query: { type: "string", description: "Search query" },
-          limit: {
-            type: "number",
-            description: "Number of results (default 10, max 10)",
-          },
         },
         required: ["query"],
       },
@@ -119,6 +113,25 @@ const AGENT_TOOLS: OpenRouterToolDefinition[] = [
           url: { type: "string", description: "URL to scrape" },
         },
         required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_repo_metadata",
+      description:
+        "Fetch real GitHub metadata (stars, language, description, confirmed full_name) for repos you plan to rank. Call once before your final answer with every candidate slug. For slugs that do not exist, automatically searches GitHub and returns the best matches.",
+      parameters: {
+        type: "object",
+        properties: {
+          repos: {
+            type: "array",
+            items: { type: "string" },
+            description: "List of owner/repo full names to resolve",
+          },
+        },
+        required: ["repos"],
       },
     },
   },
@@ -159,13 +172,20 @@ export function extractGithubFullNames(text: string): string[] {
   return out;
 }
 
+function truncateDescription(desc: string | null | undefined): string {
+  if (!desc) return "(no description)";
+  return desc.length <= MAX_DESCRIPTION_CHARS
+    ? desc
+    : `${desc.slice(0, MAX_DESCRIPTION_CHARS)}…`;
+}
+
 function formatSearchResultsForLlm(items: FirecrawlSearchResultItem[]): string {
   if (items.length === 0) return "No search results found.";
   let out = `Found ${items.length} results:\n\n`;
   for (const item of items) {
     out += `[${item.position}] ${item.title}\n`;
     out += `URL: ${item.url}\n`;
-    out += `Description: ${item.description}\n\n`;
+    out += `Description: ${truncateDescription(item.description)}\n\n`;
   }
   return out.trim();
 }
@@ -175,8 +195,42 @@ function formatGithubSearchForLlm(items: GitHubSearchHit[]): string {
   let out = `Found ${items.length} repositories (sorted by stars):\n\n`;
   for (const [i, item] of items.entries()) {
     out += `[${i + 1}] ${item.full_name} | ${item.stargazers_count} stars | ${item.language ?? "unknown"}\n`;
-    out += `  ${item.description ?? "(no description)"}\n\n`;
+    out += `  ${truncateDescription(item.description)}\n\n`;
   }
+  return out.trim();
+}
+
+function formatRepoMetadataForLlm(
+  resolved: Repo[],
+  notFound: string[],
+  searchSuggestions: Map<string, GitHubSearchHit[]>
+): string {
+  if (resolved.length === 0 && notFound.length === 0 && searchSuggestions.size === 0) {
+    return "No repositories to resolve.";
+  }
+
+  let out = `Resolved ${resolved.length} repositories (use these confirmed full_name values in your final JSON):\n\n`;
+  for (const repo of resolved) {
+    out += `${repo.full_name} | ${repo.stargazers_count} stars | ${repo.language ?? "unknown"}\n`;
+    out += `  ${truncateDescription(repo.description)}\n\n`;
+  }
+
+  if (searchSuggestions.size > 0) {
+    out += `Slugs not found on GitHub — use one of these search matches instead:\n\n`;
+    for (const [slug, hits] of searchSuggestions) {
+      out += `"${slug}" does not exist. GitHub search alternatives:\n`;
+      for (const [i, hit] of hits.entries()) {
+        out += `  [${i + 1}] ${hit.full_name} | ${hit.stargazers_count} stars | ${hit.language ?? "unknown"}\n`;
+        out += `    ${truncateDescription(hit.description)}\n`;
+      }
+      out += "\n";
+    }
+  }
+
+  if (notFound.length > 0) {
+    out += `Could not resolve (no GitHub search hits): ${notFound.join(", ")}\n`;
+  }
+
   return out.trim();
 }
 
@@ -356,6 +410,7 @@ export async function runWebSearchAgent(
       name: repoName,
       description: source.description,
       language: source.language,
+      stars: source.stargazers_count,
     };
 
     onEvent({ type: "status", message: "Searching..." });
@@ -385,7 +440,9 @@ export async function runWebSearchAgent(
       });
 
       for (const tc of toolCalls) {
-        if (toolCallsUsed >= MAX_AGENT_TOOL_CALLS) {
+        const isMetadataTool = tc.function.name === "get_repo_metadata";
+
+        if (!isMetadataTool && toolCallsUsed >= MAX_AGENT_TOOL_CALLS) {
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
@@ -394,8 +451,10 @@ export async function runWebSearchAgent(
           continue;
         }
 
-        toolCallsUsed++;
-        log.toolCalls = toolCallsUsed;
+        if (!isMetadataTool) {
+          toolCallsUsed++;
+          log.toolCalls = toolCallsUsed;
+        }
 
         let toolResult = "";
         const taskStart = Date.now();
@@ -403,7 +462,25 @@ export async function runWebSearchAgent(
         try {
           const args = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
 
-          if (tc.function.name === "github_search") {
+          if (tc.function.name === "get_repo_metadata") {
+            const repos = Array.isArray(args.repos)
+              ? args.repos.map((r) => String(r).trim()).filter((r) => r.includes("/"))
+              : [];
+
+            const { resolved, notFound, searchSuggestions } =
+              await resolveAndFetchRepos(repos);
+
+            toolResult = formatRepoMetadataForLlm(
+              resolved,
+              notFound,
+              searchSuggestions
+            );
+
+            onEvent({
+              type: "status",
+              message: `Resolved metadata for ${resolved.length} repos`,
+            });
+          } else if (tc.function.name === "github_search") {
             const query = String(args.query ?? "").trim();
             const limit =
               typeof args.limit === "number" ? args.limit : GITHUB_SEARCH_LIMIT;

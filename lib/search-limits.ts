@@ -5,10 +5,10 @@ export const MAX_SIMILAR_REPOS = 9;
 export const GRAPHQL_STATS_BATCH_SIZE = 40;
 
 /** Max tool calls per agentic search run (web_search, github_search, scrape_page). */
-export const MAX_AGENT_TOOL_CALLS = 8;
+export const MAX_AGENT_TOOL_CALLS = 7;
 
 /** Default GitHub search results per github_search call. */
-export const GITHUB_SEARCH_LIMIT = 10;
+export const GITHUB_SEARCH_LIMIT = 20;
 
 /** Max GitHub search results per call. */
 export const GITHUB_SEARCH_MAX = 30;
@@ -18,3 +18,6 @@ export const FIRECRAWL_SEARCH_LIMIT = 10;
 
 /** Max markdown chars returned from scrape_page to the LLM. */
 export const SCRAPE_MARKDOWN_MAX_CHARS = 8000;
+
+/** Max chars for a repo/search-result description passed to the LLM. */
+export const MAX_DESCRIPTION_CHARS = 120;

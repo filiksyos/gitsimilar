@@ -363,6 +363,85 @@ export async function batchFetchReposByNames(fullNames: string[]): Promise<Repo[
   return repos;
 }
 
+const METADATA_SEARCH_FALLBACK_LIMIT = 3;
+
+export type ResolveReposResult = {
+  resolved: Repo[];
+  notFound: string[];
+  searchSuggestions: Map<string, GitHubSearchHit[]>;
+};
+
+/**
+ * Resolve candidate slugs to real GitHub metadata via GraphQL batch.
+ * For slugs that do not exist, falls back to GitHub search and returns suggestions.
+ * All fetched stats are stored in repoStatsCache for reuse by batchFetchReposByNames.
+ */
+export async function resolveAndFetchRepos(
+  candidates: string[]
+): Promise<ResolveReposResult> {
+  const unique = [
+    ...new Set(
+      candidates
+        .map((c) => c.trim())
+        .filter((c) => c.includes("/"))
+    ),
+  ];
+
+  const statsMap = await batchFetchRepoDataMap(unique);
+  const resolved: Repo[] = [];
+  const notFound: string[] = [];
+  const searchSuggestions = new Map<string, GitHubSearchHit[]>();
+  const unresolved: string[] = [];
+  const resolvedKeys = new Set<string>();
+  let index = 0;
+
+  for (const fullName of unique) {
+    const key = fullName.toLowerCase();
+    const stats = statsMap.get(key);
+    if (stats) {
+      resolved.push(statsToRepo(fullName, stats, index++));
+      resolvedKeys.add(key);
+      continue;
+    }
+    unresolved.push(fullName);
+  }
+
+  for (const slug of unresolved) {
+    const repoPart = slug.split("/").pop() ?? slug;
+    const query = repoPart.replace(/-/g, " ");
+
+    try {
+      const hits = await searchRepositories(query, METADATA_SEARCH_FALLBACK_LIMIT);
+      if (hits.length === 0) {
+        notFound.push(slug);
+        continue;
+      }
+
+      searchSuggestions.set(slug, hits);
+
+      const hitNames = hits.map((h) => h.full_name);
+      const hitStatsMap = await batchFetchRepoDataMap(hitNames);
+
+      for (const hit of hits) {
+        const hitKey = hit.full_name.toLowerCase();
+        const hitStats = hitStatsMap.get(hitKey);
+        if (hitStats && !resolvedKeys.has(hitKey)) {
+          resolved.push(statsToRepo(hit.full_name, hitStats, index++));
+          resolvedKeys.add(hitKey);
+        }
+      }
+    } catch (e) {
+      console.warn(
+        `[gitsimilar] resolveAndFetchRepos search fallback failed for ${slug}:`,
+        e instanceof Error ? e.message : e
+      );
+      notFound.push(slug);
+    }
+  }
+
+  return { resolved, notFound, searchSuggestions };
+}
+
 /** @deprecated Use batchFetchReposByNames — kept for any external imports */
 export async function batchFetchRepoStats(repos: Repo[]): Promise<Map<string, RepoStats>> {
   return batchFetchRepoDataMap(repos.map((r) => r.full_name));
