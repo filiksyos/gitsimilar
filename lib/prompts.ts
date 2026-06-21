@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import type { OpenRouterMessage } from "@/lib/openrouter";
+import type { AzureChatMessage } from "@/lib/azure-openai";
 
 export type RepoQueryContext = {
   full_name: string;
@@ -43,7 +43,7 @@ export function buildAgentSystemPrompt(
 export function buildAgentInitialMessages(
   repo: RepoQueryContext,
   readmeTruncated: string
-): OpenRouterMessage[] {
+): AzureChatMessage[] {
   return [
     { role: "system", content: buildAgentSystemPrompt(repo, readmeTruncated) },
     {

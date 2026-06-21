@@ -17,11 +17,11 @@ import {
   type SearchLogSearchEntry,
 } from "@/lib/logger";
 import {
-  callOpenRouter,
-  callOpenRouterWithTools,
-  type OpenRouterMessage,
-  type OpenRouterToolDefinition,
-} from "@/lib/openrouter";
+  callAzureChatCompletions,
+  callAzureChatCompletionsWithTools,
+  type AzureChatMessage,
+  type AzureOpenAiToolDefinition,
+} from "@/lib/azure-openai";
 import { parseRepoInput } from "@/lib/parse-repo";
 import {
   buildAgentInitialMessages,
@@ -66,7 +66,7 @@ const RESERVED_REPO_SEGMENTS = new Set([
   "community",
 ]);
 
-const AGENT_TOOLS: OpenRouterToolDefinition[] = [
+const AGENT_TOOLS: AzureOpenAiToolDefinition[] = [
   {
     type: "function",
     function: {
@@ -415,7 +415,7 @@ export async function runWebSearchAgent(
 
     onEvent({ type: "status", message: "Searching..." });
 
-    const messages: OpenRouterMessage[] = buildAgentInitialMessages(
+    const messages: AzureChatMessage[] = buildAgentInitialMessages(
       repoContext,
       readmeTruncated
     );
@@ -425,7 +425,10 @@ export async function runWebSearchAgent(
     let finalAgentContent: string | null = null;
 
     while (!agentDone && toolCallsUsed < MAX_AGENT_TOOL_CALLS) {
-      const { content, toolCalls } = await callOpenRouterWithTools(messages, AGENT_TOOLS);
+      const { content, toolCalls } = await callAzureChatCompletionsWithTools(
+        messages,
+        AGENT_TOOLS
+      );
 
       if (toolCalls.length === 0) {
         finalAgentContent = content;
@@ -585,12 +588,12 @@ export async function runWebSearchAgent(
           content:
             'Tool budget exhausted. Return ONLY valid JSON: {"similar":["owner/repo",...]} ranked most-similar first.',
         });
-        finalAgentContent = await callOpenRouter(messages);
+        finalAgentContent = await callAzureChatCompletions(messages);
         agentDone = true;
       }
     }
 
-    let similarNames = parseAgentFinalContent(finalAgentContent);
+    const similarNames = parseAgentFinalContent(finalAgentContent);
     log.agentSimilarNames = similarNames;
 
     if (similarNames.length === 0) {

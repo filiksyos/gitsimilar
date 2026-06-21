@@ -30,7 +30,11 @@ function mapErrorToMessage(err: unknown): { message: string; status: number } {
   ) {
     return { message, status: 429 };
   }
-  if (message.includes("OPENROUTER_API_KEY") || message.includes("FIRECRAWL_API_KEY")) {
+  if (
+    message.includes("AZURE_OPENAI_API_KEY") ||
+    message.includes("AZURE_OPENAI_BASE_URL") ||
+    message.includes("FIRECRAWL_API_KEY")
+  ) {
     return { message, status: 500 };
   }
 
