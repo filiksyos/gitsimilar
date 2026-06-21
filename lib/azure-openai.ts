@@ -1,14 +1,12 @@
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const DEFAULT_MODEL = "gpt-5.4-mini";
 
-const DEFAULT_MODEL = "openai/gpt-4o-mini";
-
-export type OpenRouterMessage =
+export type AzureChatMessage =
   | { role: "system"; content: string }
   | { role: "user"; content: string }
-  | { role: "assistant"; content: string | null; tool_calls?: OpenRouterToolCall[] }
+  | { role: "assistant"; content: string | null; tool_calls?: AzureOpenAiToolCall[] }
   | { role: "tool"; tool_call_id: string; content: string };
 
-export type OpenRouterToolDefinition = {
+export type AzureOpenAiToolDefinition = {
   type: "function";
   function: {
     name: string;
@@ -17,7 +15,7 @@ export type OpenRouterToolDefinition = {
   };
 };
 
-export type OpenRouterToolCall = {
+export type AzureOpenAiToolCall = {
   id: string;
   type: "function";
   function: {
@@ -26,19 +24,64 @@ export type OpenRouterToolCall = {
   };
 };
 
-export type OpenRouterCompletionResult = {
+export type AzureOpenAiCompletionResult = {
   content: string | null;
-  toolCalls: OpenRouterToolCall[];
+  toolCalls: AzureOpenAiToolCall[];
   finishReason: string | null;
 };
+
+function readTrimmedEnv(name: string): string | null {
+  const value = process.env[name]?.trim();
+  return value || null;
+}
+
+function requireAzureBaseUrl(): string {
+  const baseUrl = readTrimmedEnv("AZURE_OPENAI_BASE_URL");
+  if (!baseUrl) {
+    throw new Error("AZURE_OPENAI_BASE_URL not configured");
+  }
+  return baseUrl.replace(/\/+$/, "");
+}
+
+function requireAzureApiKey(): string {
+  const apiKey = readTrimmedEnv("AZURE_OPENAI_API_KEY");
+  if (!apiKey) {
+    throw new Error("AZURE_OPENAI_API_KEY not configured");
+  }
+  return apiKey;
+}
+
+function getAzureModel(): string {
+  return readTrimmedEnv("AZURE_OPENAI_MODEL") ?? DEFAULT_MODEL;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function extractErrorMessage(data: unknown): string | null {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+
+  const err = (data as { error?: unknown }).error;
+  if (typeof err === "string" && err.trim()) {
+    return err.trim();
+  }
+
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) {
+      return message.trim();
+    }
+  }
+
+  return null;
+}
+
 function extractMessageFromResponse(data: unknown): {
   content: string | null;
-  toolCalls: OpenRouterToolCall[];
+  toolCalls: AzureOpenAiToolCall[];
   finishReason: string | null;
 } {
   if (!data || typeof data !== "object") {
@@ -53,7 +96,7 @@ function extractMessageFromResponse(data: unknown): {
   const first = choices[0] as {
     message?: {
       content?: unknown;
-      tool_calls?: OpenRouterToolCall[];
+      tool_calls?: AzureOpenAiToolCall[];
     };
     finish_reason?: string;
   };
@@ -84,21 +127,21 @@ function extractMessageFromResponse(data: unknown): {
   };
 }
 
-async function postOpenRouter(
+async function postAzureChatCompletions(
   body: Record<string, unknown>,
   retries = 3
 ): Promise<unknown> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error("OPENROUTER_API_KEY not configured");
+  const url = `${requireAzureBaseUrl()}/chat/completions`;
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60_000);
+
     try {
-      const response = await fetch(OPENROUTER_URL, {
+      const response = await fetch(url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${requireAzureApiKey()}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
@@ -108,63 +151,69 @@ async function postOpenRouter(
       const raw = await response.json().catch(() => ({}));
       if (!response.ok) {
         const errMsg =
-          typeof raw === "object" && raw !== null && "error" in raw
-            ? String((raw as { error?: { message?: string } }).error?.message ?? response.statusText)
-            : response.statusText;
+          extractErrorMessage(raw) || `Azure OpenAI error (${response.status})`;
+
         if (response.status === 429) {
           throw new Error("AI rate limit hit, please retry in a moment.");
         }
+
         if (attempt < retries) {
-          console.error(`OpenRouter error (${response.status}):`, errMsg);
+          console.error(`Azure OpenAI error (${response.status}):`, errMsg);
           await sleep(1000 * attempt);
           continue;
         }
-        throw new Error(errMsg || `OpenRouter error (${response.status})`);
+
+        throw new Error(errMsg);
       }
 
       return raw;
-    } catch (e) {
-      if (e instanceof Error && e.message.includes("rate limit")) throw e;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("rate limit")) {
+        throw error;
+      }
+
       if (attempt < retries) {
-        console.error("OpenRouter attempt failed:", e);
+        console.error("Azure OpenAI attempt failed:", error);
         await sleep(1000 * attempt);
         continue;
       }
-      if (e instanceof Error) throw e;
-      throw new Error(String(e));
+
+      if (error instanceof Error) {
+        throw error;
+      }
+
+      throw new Error(String(error));
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  throw new Error("OpenRouter request failed after retries");
+  throw new Error("Azure OpenAI request failed after retries");
 }
 
-/**
- * Calls OpenRouter chat completions with per-request retries (empty body or network error).
- */
-export async function callOpenRouter(
-  messages: OpenRouterMessage[],
+export async function callAzureChatCompletions(
+  messages: AzureChatMessage[],
   retries = 3
 ): Promise<string> {
-  const model = process.env.OPENROUTER_MODEL ?? DEFAULT_MODEL;
-  const raw = await postOpenRouter({ model, messages }, retries);
+  const raw = await postAzureChatCompletions(
+    {
+      model: getAzureModel(),
+      messages,
+    },
+    retries
+  );
   const { content } = extractMessageFromResponse(raw);
   return content ?? "";
 }
 
-/**
- * OpenRouter chat with tool definitions; returns assistant content and/or tool_calls.
- */
-export async function callOpenRouterWithTools(
-  messages: OpenRouterMessage[],
-  tools: OpenRouterToolDefinition[],
+export async function callAzureChatCompletionsWithTools(
+  messages: AzureChatMessage[],
+  tools: AzureOpenAiToolDefinition[],
   retries = 3
-): Promise<OpenRouterCompletionResult> {
-  const model = process.env.OPENROUTER_MODEL ?? DEFAULT_MODEL;
-  const raw = await postOpenRouter(
+): Promise<AzureOpenAiCompletionResult> {
+  const raw = await postAzureChatCompletions(
     {
-      model,
+      model: getAzureModel(),
       messages,
       tools,
       tool_choice: "auto",
