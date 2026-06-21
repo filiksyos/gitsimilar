@@ -36,3 +36,5 @@ yarn-error.log*
 
 # search debug logs
 /logs
+
+.vercel
