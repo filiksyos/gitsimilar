@@ -23,6 +23,9 @@ export const metadata: Metadata = {
     description: "Paste a GitHub repo and discover similar projects.",
     type: "website",
   },
+  other: {
+    "impact-site-verification": "fe2d3919-c9e9-4684-b1b6-b5c5e873f73e",
+  },
 };
 
 export default function RootLayout({
@@ -35,12 +38,6 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${spaceGrotesk.variable} h-full bg-[#fffdf8] antialiased`}
     >
-      <head>
-        <meta
-          name="impact-site-verification"
-          value="fe2d3919-c9e9-4684-b1b6-b5c5e873f73e"
-        />
-      </head>
       <body className="antialiased">
         {children}
         <Analytics />
