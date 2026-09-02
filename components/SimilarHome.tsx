@@ -296,6 +296,20 @@ export function SimilarHome({ initialRepo = "facebook/react", autoSubmit = false
           </section>
         )}
       </main>
+
+      <footer className="border-t-[3px] border-zinc-900 py-6 text-center text-sm text-zinc-500">
+        <p className="px-4 sm:px-6">
+          Made by{" "}
+          <a
+            href="https://filiksyos.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-[#16a34a] underline decoration-[#16a34a] underline-offset-2 transition-colors hover:text-[#15803d] hover:decoration-[#15803d]"
+          >
+            Filiksyos
+          </a>
+        </p>
+      </footer>
     </div>
   );
 }
